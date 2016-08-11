@@ -18,7 +18,11 @@ my $MVM_operand_type_var    := (10 * 8);
 my $MVM_operand_lex_outer   := (11 * 8);
 my $MVM_operand_coderef     := (12 * 8);
 my $MVM_operand_callsite    := (13 * 8);
-my $MVM_operand_type_mask   := (15 * 8);
+my $MVM_operand_type_mask   := (31 * 8);
+my $MVM_operand_uint8       := ($MVM_reg_uint8 * 8);
+my $MVM_operand_uint16      := ($MVM_reg_uint16 * 8);
+my $MVM_operand_uint32      := ($MVM_reg_uint32 * 8);
+my $MVM_operand_uint64      := ($MVM_reg_uint64 * 8);
 
 # This is used as a return value from all of the various compilation routines.
 # It groups together a set of instructions along with a result register and a
@@ -30,7 +34,7 @@ class MAST::InstructionList {
     has str $!filename;
     has int $!lineno;
 
-    method new(@instructions, $result_reg, $result_kind, :$filename = '<anon>', :$lineno = 0) {
+    method new(@instructions, $result_reg, $result_kind, str :$filename = '<anon>', int :$lineno = 0) {
         my $obj := nqp::create(self);
         nqp::bindattr($obj, MAST::InstructionList, '@!instructions', @instructions);
         nqp::bindattr($obj, MAST::InstructionList, '$!result_reg', $result_reg);
@@ -120,7 +124,7 @@ class QAST::MASTOperations {
         else {
             nqp::die("MoarVM op '$op' is unknown as a core or extension op");
         }
-        
+
         my $num_args := +@args;
         my $operand_num := 0;
         my $result_kind := $MVM_reg_void;
@@ -213,7 +217,8 @@ class QAST::MASTOperations {
             # put the arg exression's generation code in the instruction list
             nqp::splice(@all_ins, $arg.instructions, +@all_ins, 0)
                 unless $constant_operand;
-            if @deconts[$arg_num] {
+            if @deconts[$arg_num] &&
+                    (!$_.has_compile_time_value || nqp::iscont($_.compile_time_value)) {
                 my $dc_reg := $regalloc.fresh_register($MVM_reg_obj);
                 nqp::push(@all_ins, MAST::Op.new( :op('decont'), $dc_reg, $arg.result_reg ));
                 nqp::push(@arg_regs, $dc_reg);
@@ -297,28 +302,43 @@ class QAST::MASTOperations {
     }
 
     # Adds a core op that maps to a Moar op.
-    method add_core_moarop_mapping(str $op, str $moarop, $ret = -1, :$mapper?, :$decont, :$inlinable = 1) {
-        my $moarop_mapper := $mapper
-            ?? $mapper(self, $moarop, $ret)
-            !! self.moarop_mapper($moarop, $ret, $decont);
-        %core_ops{$op} := -> $qastcomp, $op {
-            $moarop_mapper($qastcomp, $op.op, $op.list)
-        };
+    method add_core_moarop_mapping(str $op, str $moarop, $ret = -1, :$decont, :$inlinable = 1) {
+        %core_ops{$op} := self.moarop_mapper($moarop, $ret, $decont);
         self.set_core_op_inlinability($op, $inlinable);
         self.set_core_op_result_type($op, moarop_return_type($moarop));
     }
 
     # Adds a HLL op that maps to a Moar op.
-    method add_hll_moarop_mapping(str $hll, str $op, str $moarop, $ret = -1, :$mapper?, :$decont, :$inlinable = 1) {
-        my $moarop_mapper := $mapper
-            ?? $mapper(self, $moarop, $ret)
-            !! self.moarop_mapper($moarop, $ret, $decont);
+    method add_hll_moarop_mapping(str $hll, str $op, str $moarop, $ret = -1, :$decont, :$inlinable = 1) {
         %hll_ops{$hll} := {} unless %hll_ops{$hll};
-        %hll_ops{$hll}{$op} := -> $qastcomp, $op {
-            $moarop_mapper($qastcomp, $op.op, $op.list)
-        };
+        %hll_ops{$hll}{$op} := self.moarop_mapper($moarop, $ret, $decont);
         self.set_hll_op_inlinability($hll, $op, $inlinable);
         self.set_hll_op_result_type($hll, $op, moarop_return_type($moarop));
+    }
+
+    method check_ret_val(str $moarop, $ret) {
+        my int $num_operands;
+        my int $operands_offset;
+        my @operands_values;
+        if nqp::existskey(%core_op_codes, $moarop) {
+            my int $op_num   := %core_op_codes{$moarop};
+            $num_operands    := nqp::atpos_i(@core_operands_counts, $op_num);
+            $operands_offset := nqp::atpos_i(@core_operands_offsets, $op_num);
+            @operands_values := @core_operands_values;
+        }
+        elsif MAST::ExtOpRegistry.extop_known($moarop) {
+            @operands_values := MAST::ExtOpRegistry.extop_signature($moarop);
+            $num_operands    := nqp::elems(@operands_values);
+            $operands_offset := 0;
+        }
+        else {
+            nqp::die("MoarVM op '$moarop' is unknown as a core or extension op");
+        }
+        nqp::die("moarop $moarop return arg index out of range")
+            if $ret < -1 || $ret >= $num_operands;
+        nqp::die("moarop $moarop is not void")
+            if $num_operands && (nqp::atpos_i(@operands_values, $operands_offset) +& $MVM_operand_rw_mask) ==
+                $MVM_operand_write_reg;
     }
 
     # Returns a mapper closure for turning an operation into a Moar op.
@@ -330,30 +350,9 @@ class QAST::MASTOperations {
         my $self := self;
 
         if $ret != -1 {
-            my int $num_operands;
-            my int $operands_offset;
-            my @operands_values;
-            if nqp::existskey(%core_op_codes, $moarop) {
-                my int $op_num   := %core_op_codes{$moarop};
-                $num_operands    := nqp::atpos_i(@core_operands_counts, $op_num);
-                $operands_offset := nqp::atpos_i(@core_operands_offsets, $op_num);
-                @operands_values := @core_operands_values;
-            }
-            elsif MAST::ExtOpRegistry.extop_known($moarop) {
-                @operands_values := MAST::ExtOpRegistry.extop_signature($moarop);
-                $num_operands    := nqp::elems(@operands_values);
-                $operands_offset := 0;
-            }
-            else {
-                nqp::die("MoarVM op '$moarop' is unknown as a core or extension op");
-            }
-            nqp::die("moarop $moarop return arg index out of range")
-                if $ret < -1 || $ret >= $num_operands;
-            nqp::die("moarop $moarop is not void")
-                if $num_operands && (nqp::atpos_i(@operands_values, $operands_offset) +& $MVM_operand_rw_mask) ==
-                    $MVM_operand_write_reg;
+            self.check_ret_val($moarop, $ret);
         }
-        
+
         my @deconts;
         if nqp::islist($decont_in) {
             for $decont_in { @deconts[$_] := 1; }
@@ -362,8 +361,8 @@ class QAST::MASTOperations {
             @deconts[$decont_in] := 1;
         }
 
-        -> $qastcomp, $op_name, @op_args {
-            $self.compile_mastop($qastcomp, $moarop, @op_args, @deconts, :returnarg($ret))
+        -> $qastcomp, $op {
+            $self.compile_mastop($qastcomp, $moarop, $op.list, @deconts, :returnarg($ret))
         }
     }
 
@@ -407,7 +406,7 @@ class QAST::MASTOperations {
             %core_result_type{$op} := str;
         }
     }
-    
+
     # Sets op inlinability at a HLL level. (Can override at HLL level whether
     # or not the HLL overrides the op itself.)
     method set_hll_op_result_type(str $hll, str $op, $type) {
@@ -439,7 +438,8 @@ class QAST::MASTOperations {
 
     # Adds a HLL box handler.
     method add_hll_box(str $hll, $type, $handler) {
-        unless $type == $MVM_reg_int64 || $type == $MVM_reg_num64 || $type == $MVM_reg_str || $type == $MVM_reg_void {
+        unless $type == $MVM_reg_int64 || $type == $MVM_reg_num64 || $type == $MVM_reg_str ||
+                $type == $MVM_reg_uint64 || $type == $MVM_reg_void {
             nqp::die("Unknown box type '$type'");
         }
         %hll_box{$hll} := {} unless nqp::existskey(%hll_box, $hll);
@@ -448,7 +448,8 @@ class QAST::MASTOperations {
 
     # Adds a HLL unbox handler.
     method add_hll_unbox(str $hll, $type, $handler) {
-        unless $type == $MVM_reg_int64 || $type == $MVM_reg_num64 || $type == $MVM_reg_str {
+        unless $type == $MVM_reg_int64 || $type == $MVM_reg_num64 ||
+                $type == $MVM_reg_str || $type == $MVM_reg_uint64 {
             nqp::die("Unknown unbox type '$type'");
         }
         %hll_unbox{$hll} := {} unless nqp::existskey(%hll_unbox, $hll);
@@ -1033,26 +1034,26 @@ for ('', 'repeat_') -> $repness {
                     QAST::Var.new( :name($cond_temp), :scope('local') ));
             }
 
+            # Allocate result register if needed.
+            my $regalloc := $*REGALLOC;
+            my $res_kind := $MVM_reg_obj;
+            my $res_reg;
+            if nqp::defined($*WANT) && $*WANT == $MVM_reg_void {
+                $res_kind := $MVM_reg_void;
+                $res_reg := MAST::VOID;
+            } else {
+                $res_reg := $regalloc.fresh_register($res_kind);
+            }
+
             # Compile each of the children.
             my @comp_ops;
             my @comp_types;
-            my $regalloc := $*REGALLOC;
             for @children {
                 my $comp := nqp::elems(@comp_ops) == 0
                     ?? $qastcomp.as_mast($_)
                     !! $qastcomp.as_mast($_, :want($MVM_reg_void));
                 @comp_ops.push($comp);
                 @comp_types.push($comp.result_kind);
-            }
-
-            my $res_kind := $MVM_reg_obj;
-            my $res_reg;
-
-            if nqp::defined($*WANT) && $*WANT == $MVM_reg_void {
-                $res_kind := $MVM_reg_void;
-                $res_reg := MAST::VOID;
-            } else {
-                $res_reg := $regalloc.fresh_register($res_kind);
             }
 
             if $orig_type {
@@ -1187,6 +1188,10 @@ QAST::MASTOperations.add_core_op('for', -> $qastcomp, $op {
     unless nqp::istype(@operands[1], QAST::Block) {
         nqp::die("Operation 'for' expects a block as its second operand");
     }
+
+
+    my $orig_blocktype := @operands[1].blocktype;
+
     if @operands[1].blocktype eq 'immediate' {
         @operands[1].blocktype('declaration');
     }
@@ -1294,6 +1299,8 @@ QAST::MASTOperations.add_core_op('for', -> $qastcomp, $op {
     }
     nqp::push($il, $lbl_done);
 
+    @operands[1].blocktype($orig_blocktype);
+
     # Result; probably void, though evaluate to the input list if we must
     # give a value.
     $regalloc.release_register($block_res.result_reg, $block_res.result_kind);
@@ -1323,6 +1330,16 @@ my @kind_to_args := [0,
 sub handle_arg($arg, $qastcomp, @ins, @arg_regs, @arg_flags, @arg_kinds) {
     # generate the code for the arg expression
     my $arg_mast := $qastcomp.as_mast($arg);
+    my int $arg_mast_kind := $arg_mast.result_kind;
+    if $arg_mast_kind == $MVM_reg_num32 {
+        $arg_mast := $qastcomp.coerce($arg_mast, $MVM_reg_num64);
+    }
+    elsif $arg_mast_kind == $MVM_reg_int32 || $arg_mast_kind == $MVM_reg_int16 ||
+            $arg_mast_kind == $MVM_reg_int8 || $arg_mast_kind == $MVM_reg_uint64 ||
+            $arg_mast_kind == $MVM_reg_uint32 || $arg_mast_kind == $MVM_reg_uint16 ||
+            $arg_mast_kind == $MVM_reg_uint8 {
+        $arg_mast := $qastcomp.coerce($arg_mast, $MVM_reg_int64);
+    }
 
     nqp::die("arg expression cannot be void")
         if $arg_mast.result_kind == $MVM_reg_void;
@@ -1608,6 +1625,10 @@ QAST::MASTOperations.add_core_moarop_mapping('backtrace', 'backtrace');
 QAST::MASTOperations.add_core_moarop_mapping('throw', 'throwdyn');
 QAST::MASTOperations.add_core_moarop_mapping('rethrow', 'rethrow');
 QAST::MASTOperations.add_core_moarop_mapping('resume', 'resume');
+QAST::MASTOperations.add_core_moarop_mapping('throwpayloadlex', 'throwpayloadlex', :!inlinable);
+QAST::MASTOperations.add_core_moarop_mapping('throwpayloadlexcaller', 'throwpayloadlexcaller', :!inlinable);
+QAST::MASTOperations.add_core_moarop_mapping('lastexpayload', 'lastexpayload');
+QAST::MASTOperations.add_core_moarop_mapping('throwextype', 'throwcatdyn');
 
 my %handler_names := nqp::hash(
     'CATCH',   $HandlerCategory::catch,
@@ -1622,6 +1643,7 @@ my %handler_names := nqp::hash(
     'AWAIT',   $HandlerCategory::await,
     'EMIT',    $HandlerCategory::emit,
     'DONE',    $HandlerCategory::done,
+    'RETURN',  $HandlerCategory::return,
 );
 QAST::MASTOperations.add_core_op('handle', :!inlinable, sub ($qastcomp, $op) {
     my @children := nqp::clone($op.list());
@@ -1711,6 +1733,36 @@ QAST::MASTOperations.add_core_op('handle', :!inlinable, sub ($qastcomp, $op) {
     MAST::InstructionList.new($il, $protil.result_reg, $MVM_reg_obj)
 });
 
+# Simple payload handler.
+QAST::MASTOperations.add_core_op('handlepayload', :!inlinable, sub ($qastcomp, $op) {
+    my @children := $op.list;
+    if @children != 3 {
+        nqp::die("The 'handlepayload' op requires three children");
+    }
+    my str $type := @children[1];
+    unless nqp::existskey(%handler_names, $type) {
+        nqp::die("Invalid handler type '$type'");
+    }
+    my int $mask := %handler_names{$type};
+
+    my $il        := nqp::list();
+    my $protected := $qastcomp.as_mast(@children[0], :want($MVM_reg_obj));
+    my $handler   := $qastcomp.as_mast(@children[2], :want($MVM_reg_obj));
+    my $endlbl     := MAST::Label.new();
+    my $handlelbl  := MAST::Label.new();
+    push_op($protected.instructions, 'goto', $endlbl);
+    nqp::push($il, MAST::HandlerScope.new(
+        :instructions($protected.instructions), :goto($handlelbl),
+        :category_mask($mask), :action($HandlerAction::unwind_and_goto_with_payload)));
+    nqp::push($il, $handlelbl);
+    push_ilist($il, $handler);
+    push_op($il, 'set', $protected.result_reg, $handler.result_reg);
+    nqp::push($il, $endlbl);
+    $*REGALLOC.release_register($handler.result_reg, $MVM_reg_obj);
+
+    MAST::InstructionList.new($il, $protected.result_reg, $MVM_reg_obj)
+});
+
 # Control exception throwing.
 my %control_map := nqp::hash(
     'next', $HandlerCategory::next,
@@ -1792,6 +1844,20 @@ QAST::MASTOperations.add_hll_unbox('', $MVM_reg_str, -> $qastcomp, $reg {
     $regalloc.release_register($dc, $MVM_reg_obj);
     MAST::InstructionList.new($il, $res_reg, $MVM_reg_str)
 });
+QAST::MASTOperations.add_hll_unbox('', $MVM_reg_uint64, -> $qastcomp, $reg {
+    my $regalloc := $*REGALLOC;
+    my $il := nqp::list();
+    my $a := $regalloc.fresh_register($MVM_reg_num64);
+    my $b := $regalloc.fresh_register($MVM_reg_uint64);
+    $regalloc.release_register($reg, $MVM_reg_obj);
+    my $dc := $regalloc.fresh_register($MVM_reg_obj);
+    push_op($il, 'decont', $dc, $reg);
+    push_op($il, 'smrt_numify', $a, $dc);
+    push_op($il, 'coerce_nu', $b, $a);
+    $regalloc.release_register($a, $MVM_reg_num64);
+    $regalloc.release_register($dc, $MVM_reg_obj);
+    MAST::InstructionList.new($il, $b, $MVM_reg_int64)
+});
 sub boxer($kind, $type_op, $op) {
     -> $qastcomp, $reg {
         my $regalloc := $*REGALLOC;
@@ -1806,6 +1872,7 @@ sub boxer($kind, $type_op, $op) {
 QAST::MASTOperations.add_hll_box('', $MVM_reg_int64, boxer($MVM_reg_int64, 'hllboxtype_i', 'box_i'));
 QAST::MASTOperations.add_hll_box('', $MVM_reg_num64, boxer($MVM_reg_num64, 'hllboxtype_n', 'box_n'));
 QAST::MASTOperations.add_hll_box('', $MVM_reg_str, boxer($MVM_reg_str, 'hllboxtype_s', 'box_s'));
+QAST::MASTOperations.add_hll_box('', $MVM_reg_uint64, boxer($MVM_reg_uint64, 'hllboxtype_i', 'box_u'));
 QAST::MASTOperations.add_hll_box('', $MVM_reg_void, -> $qastcomp, $reg {
     my $il := nqp::list();
     my $res_reg := $*REGALLOC.fresh_register($MVM_reg_obj);
@@ -1840,6 +1907,8 @@ QAST::MASTOperations.add_core_moarop_mapping('captureexistsnamed', 'captureexist
 QAST::MASTOperations.add_core_moarop_mapping('capturehasnameds', 'capturehasnameds');
 QAST::MASTOperations.add_core_moarop_mapping('capturenamedshash', 'capturenamedshash');
 QAST::MASTOperations.add_core_moarop_mapping('objprimspec', 'objprimspec');
+QAST::MASTOperations.add_core_moarop_mapping('objprimbits', 'objprimbits');
+QAST::MASTOperations.add_core_moarop_mapping('objprimunsigned', 'objprimunsigned');
 
 # Multiple dispatch related.
 QAST::MASTOperations.add_core_moarop_mapping('invokewithcapture', 'invokewithcapture');
@@ -1874,6 +1943,7 @@ my %const_map := nqp::hash(
     'CONTROL_NEXT',         4,
     'CONTROL_REDO',         8,
     'CONTROL_LAST',         16,
+    'CONTROL_RETURN',       32,
     'CONTROL_TAKE',         128,
     'CONTROL_WARN',         256,
     'CONTROL_SUCCEED',      512,
@@ -1913,6 +1983,7 @@ my %const_map := nqp::hash(
     'PIPE_INHERIT_ERR',         64,
     'PIPE_IGNORE_ERR',          128,
     'PIPE_CAPTURE_ERR',         256,
+    'PIPE_MERGED_OUT_ERR',      512,
 
     'SIG_HUP',                  1,
     'SIG_INT',                  2,
@@ -1950,11 +2021,17 @@ my %const_map := nqp::hash(
     'SIG_PWR',                  130,
     'SIG_BREAK',                221,
 
+    'TYPE_CHECK_CACHE_DEFINITIVE',  0,
+    'TYPE_CHECK_CACHE_THEN_METHOD', 1,
+    'TYPE_CHECK_NEEDS_ACCEPTS',     2,
+
     'C_TYPE_CHAR',              -1,
     'C_TYPE_SHORT',             -2,
     'C_TYPE_INT',               -3,
     'C_TYPE_LONG',              -4,
     'C_TYPE_LONGLONG',          -5,
+    'C_TYPE_SIZE_T',            -6,
+    'C_TYPE_BOOL',              -7,
     'C_TYPE_FLOAT',             -1,
     'C_TYPE_DOUBLE',            -2,
     'C_TYPE_LONGDOUBLE',        -3,
@@ -1984,7 +2061,9 @@ QAST::MASTOperations.add_core_moarop_mapping('associative_bind', 'bindkey_o', 2)
 QAST::MASTOperations.add_core_moarop_mapping('say', 'say', 0);
 QAST::MASTOperations.add_core_moarop_mapping('print', 'print', 0);
 QAST::MASTOperations.add_core_moarop_mapping('stat', 'stat');
+QAST::MASTOperations.add_core_moarop_mapping('stat_time', 'stat_time');
 QAST::MASTOperations.add_core_moarop_mapping('lstat', 'lstat');
+QAST::MASTOperations.add_core_moarop_mapping('lstat_time', 'lstat_time');
 QAST::MASTOperations.add_core_moarop_mapping('open', 'open_fh');
 QAST::MASTOperations.add_core_moarop_mapping('filereadable', 'filereadable');
 QAST::MASTOperations.add_core_moarop_mapping('filewritable', 'filewritable');
@@ -2015,6 +2094,7 @@ QAST::MASTOperations.add_core_moarop_mapping('eoffh', 'eof_fh');
 QAST::MASTOperations.add_core_moarop_mapping('closefh', 'close_fh', 0);
 QAST::MASTOperations.add_core_moarop_mapping('closefh_i', 'close_fhi');
 QAST::MASTOperations.add_core_moarop_mapping('isttyfh', 'istty_fh');
+QAST::MASTOperations.add_core_moarop_mapping('filenofh', 'fileno_fh');
 QAST::MASTOperations.add_core_moarop_mapping('socket', 'socket');
 QAST::MASTOperations.add_core_moarop_mapping('connect', 'connect_sk', 0);
 QAST::MASTOperations.add_core_moarop_mapping('bindsock', 'bind_sk', 0);
@@ -2340,6 +2420,9 @@ QAST::MASTOperations.add_core_moarop_mapping('atposnd', 'atposnd_o');
 QAST::MASTOperations.add_core_moarop_mapping('atposnd_i', 'atposnd_i');
 QAST::MASTOperations.add_core_moarop_mapping('atposnd_n', 'atposnd_n');
 QAST::MASTOperations.add_core_moarop_mapping('atposnd_s', 'atposnd_s');
+QAST::MASTOperations.add_core_moarop_mapping('multidimref_i', 'multidimref_i');
+QAST::MASTOperations.add_core_moarop_mapping('multidimref_n', 'multidimref_n');
+QAST::MASTOperations.add_core_moarop_mapping('multidimref_s', 'multidimref_s');
 QAST::MASTOperations.add_core_moarop_mapping('atkey', 'atkey_o');
 QAST::MASTOperations.add_core_moarop_mapping('atkey_i', 'atkey_i');
 QAST::MASTOperations.add_core_moarop_mapping('atkey_n', 'atkey_n');
@@ -2419,7 +2502,7 @@ QAST::MASTOperations.add_core_moarop_mapping('who', 'getwho', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('where', 'getwhere', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('objectid', 'objectid', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('findmethod', 'findmeth_s', :decont(0));
-QAST::MASTOperations.add_core_moarop_mapping('setwho', 'setwho');
+QAST::MASTOperations.add_core_moarop_mapping('setwho', 'setwho', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('rebless', 'rebless', :decont(0, 1));
 QAST::MASTOperations.add_core_moarop_mapping('knowhow', 'knowhow');
 QAST::MASTOperations.add_core_moarop_mapping('knowhowattr', 'knowhowattr');
@@ -2533,9 +2616,11 @@ QAST::MASTOperations.add_core_moarop_mapping('hintfor', 'hintfor');
 QAST::MASTOperations.add_core_moarop_mapping('unbox_i', 'unbox_i', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('unbox_n', 'unbox_n', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('unbox_s', 'unbox_s', :decont(0));
+QAST::MASTOperations.add_core_moarop_mapping('unbox_u', 'unbox_u', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('box_i', 'box_i');
 QAST::MASTOperations.add_core_moarop_mapping('box_n', 'box_n');
 QAST::MASTOperations.add_core_moarop_mapping('box_s', 'box_s');
+QAST::MASTOperations.add_core_moarop_mapping('box_u', 'box_u');
 QAST::MASTOperations.add_core_moarop_mapping('can', 'can_s', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('reprname', 'reprname', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('newtype', 'newtype', :decont(0));
@@ -2617,6 +2702,7 @@ QAST::MASTOperations.add_core_moarop_mapping('parameterizetype', 'parameterizety
 QAST::MASTOperations.add_core_moarop_mapping('typeparameterized', 'typeparameterized', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('typeparameters', 'typeparameters', :decont(0));
 QAST::MASTOperations.add_core_moarop_mapping('typeparameterat', 'typeparameterat', :decont(0));
+QAST::MASTOperations.add_core_moarop_mapping('setdebugtypename', 'setdebugtypename', 0);
 
 # defined - overridden by HLL, but by default same as .DEFINITE.
 QAST::MASTOperations.add_core_moarop_mapping('defined', 'isconcrete', :decont(0));
@@ -2696,6 +2782,8 @@ QAST::MASTOperations.add_core_moarop_mapping('getcurhllsym', 'getcurhllsym');
 QAST::MASTOperations.add_core_moarop_mapping('bindcurhllsym', 'bindcurhllsym');
 QAST::MASTOperations.add_core_moarop_mapping('sethllconfig', 'sethllconfig');
 QAST::MASTOperations.add_core_moarop_mapping('loadbytecode', 'loadbytecode');
+QAST::MASTOperations.add_core_moarop_mapping('loadbytecodebuffer', 'loadbytecodebuffer');
+QAST::MASTOperations.add_core_moarop_mapping('loadbytecodefh', 'loadbytecodefh');
 QAST::MASTOperations.add_core_moarop_mapping('settypehll', 'settypehll', 0);
 QAST::MASTOperations.add_core_moarop_mapping('settypehllrole', 'settypehllrole', 0);
 QAST::MASTOperations.add_core_moarop_mapping('usecompileehllconfig', 'usecompileehllconfig');
@@ -2779,12 +2867,16 @@ QAST::MASTOperations.add_core_moarop_mapping('queuepoll', 'queuepoll');
 # asynchrony related ops
 QAST::MASTOperations.add_core_moarop_mapping('timer', 'timer');
 QAST::MASTOperations.add_core_moarop_mapping('cancel', 'cancel', 0);
+QAST::MASTOperations.add_core_moarop_mapping('cancelnotify', 'cancelnotify', 0);
 QAST::MASTOperations.add_core_moarop_mapping('signal', 'signal');
 QAST::MASTOperations.add_core_moarop_mapping('watchfile', 'watchfile');
 QAST::MASTOperations.add_core_moarop_mapping('asyncconnect', 'asyncconnect');
 QAST::MASTOperations.add_core_moarop_mapping('asynclisten', 'asynclisten');
+QAST::MASTOperations.add_core_moarop_mapping('asyncudp', 'asyncudp');
 QAST::MASTOperations.add_core_moarop_mapping('asyncwritestr', 'asyncwritestr');
 QAST::MASTOperations.add_core_moarop_mapping('asyncwritebytes', 'asyncwritebytes');
+QAST::MASTOperations.add_core_moarop_mapping('asyncwritestrto', 'asyncwritestrto');
+QAST::MASTOperations.add_core_moarop_mapping('asyncwritebytesto', 'asyncwritebytesto');
 QAST::MASTOperations.add_core_moarop_mapping('asyncreadchars', 'asyncreadchars');
 QAST::MASTOperations.add_core_moarop_mapping('asyncreadbytes', 'asyncreadbytes');
 QAST::MASTOperations.add_core_moarop_mapping('spawnprocasync', 'spawnprocasync');

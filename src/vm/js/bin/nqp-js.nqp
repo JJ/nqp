@@ -13,7 +13,10 @@ sub MAIN(*@ARGS) {
 
     my @clo := $nqpcomp-cc.commandline_options();
     @clo.push('source-map');
+    @clo.push('source-map-debug');
     @clo.push('beautify');
+    @clo.push('substagestats');
+    @clo.push('cps=s');
     @clo.push('nyi=s');
 
     $nqpcomp-cc.command_line(@ARGS,:module-path('gen/js/stage2'),

@@ -1,42 +1,54 @@
 var op = {};
 exports.op = op;
 
-var NQPInt = require("./nqp-int.js");
+var NQPInt = require('./nqp-int.js');
+var NQPException = require('./nqp-exception.js');
 exports.NQPInt = NQPInt;
 
-function load_ops(module) {
+function loadOps(module) {
   for (var name in module.op) {
     op[name] = module.op[name];
   }
 }
 
+exports.loadOps = loadOps;
+
 var core = require('./core');
-load_ops(core);
+loadOps(core);
 exports.hash = core.hash;
-exports.slurpy_named = core.slurpy_named;
+exports.slurpyNamed = core.slurpyNamed;
 exports.named = core.named;
-exports.unwrap_named = core.unwrap_named;
+exports.unwrapNamed = core.unwrapNamed;
+
+exports.EvalResult = core.EvalResult;
 
 var io = require('./io.js');
-load_ops(io);
+loadOps(io);
 
 var bignum = require('./bignum.js');
-load_ops(bignum);
+loadOps(bignum);
 
 var nfa = require('./nfa.js');
-load_ops(nfa);
+loadOps(nfa);
 
 var cclass = require('./cclass.js');
-load_ops(cclass);
+loadOps(cclass);
+
+var hll = require('./hll.js');
+loadOps(hll);
 
 var deserialization = require('./deserialization.js');
 exports.wval = deserialization.wval;
-load_ops(deserialization);
+loadOps(deserialization);
 
 var serialization = require('./serialization.js');
-load_ops(serialization);
+loadOps(serialization);
 
-exports.CodeRef = require('./code-ref.js');
+var nativecall = require('./nativecall.js');
+loadOps(nativecall);
+
+var CodeRef = require('./code-ref.js');
+exports.CodeRef = CodeRef;
 
 exports.CurLexpad = require('./curlexpad.js');
 
@@ -45,6 +57,8 @@ var Hash = require('./hash.js');
 var bootstrap = require('./bootstrap.js');
 module.exports.knowhowattr = bootstrap.knowhowattr;
 module.exports.knowhow = bootstrap.knowhow;
+
+module.exports.NQPArray = require('./array.js');
 
 var saveCtxAs;
 var savedCtxs = {};
@@ -56,18 +70,20 @@ function saveCtx(where, block) {
   saveCtxAs = old;
 }
 
-exports.load_setting = function(settingName) {
-  exports.load_module(settingName + '.setting');
-};
-
-exports.load_module = function(module) {
+exports.loadModule = function(module, helper) {
   saveCtx(module, function() {
     module = module.replace(/::/g, '/');
-    require(module);
+    if (helper) {
+      helper();
+    } else {
+      require(module);
+    }
   });
 };
 
-exports.setup_setting = function(settingName) {
+exports.loadSetting = exports.loadModule;
+
+exports.setupSetting = function(settingName) {
   return savedCtxs[settingName + '.setting'];
 };
 
@@ -79,8 +95,13 @@ exports.ctxsave = function(ctx) {
 var LexPadHack = require('./lexpad-hack.js');
 
 op.loadbytecode = function(ctx, file) {
-  exports.load_module(file);
-  ctx.bind_dynamic('$*MAIN_CTX', new LexPadHack(savedCtxs[file]));
+  // HACK - temporary hack for rakudo-js
+  if (file == '/share/nqp/lib/Perl6/BOOTSTRAP.js') {
+    file = 'Perl6::BOOTSTRAP';
+  }
+  exports.loadModule(file);
+  // HACK - ctx is sometimes NULL on rakudo-js
+  if (ctx) ctx.bindDynamic('$*MAIN_CTX', new LexPadHack(savedCtxs[file]));
   return file;
 };
 
@@ -89,7 +110,7 @@ op.ctxlexpad = function(ctx) {
   if (ctx instanceof LexPadHack) {
     return ctx;
   } else {
-    console.log("ctxlexpad NYI");
+    console.log('ctxlexpad NYI');
   }
 };
 
@@ -99,56 +120,53 @@ op.lexprimspec = function(pad, key) {
 };
 
 op.ctxouter = function(hack) {
- return null;
+  return null;
 };
 
-exports.to_str = function(arg, ctx) {
+exports.toStr = function(arg, ctx) {
   if (typeof arg == 'number') {
     return arg.toString();
   } else if (typeof arg == 'string') {
     return arg;
   } else if (arg === null) {
     return arg;
-  } else if (arg !== undefined && arg !== null && arg.type_object_) {
+  } else if (arg !== undefined && arg !== null && arg.typeObject_) {
     return '';
   } else if (arg.Str) {
-    return arg.Str(ctx);
-  } else if (arg.$$get_str) {
-    return arg.$$get_str();
-  } else if (arg.$$get_num) {
-    return arg.$$get_num().toString();
-  } else if (arg.$$get_int) {
-    return arg.$$get_int().toString();
+    return arg.Str(ctx, null, arg);
+  } else if (arg.$$getStr) {
+    return arg.$$getStr();
+  } else if (arg.$$getNum) {
+    return arg.$$getNum().toString();
+  } else if (arg.$$getInt) {
+    return arg.$$getInt().toString();
   } else {
-    console.log(arg);
-    throw "Can't convert to str";
+    throw new NQPException("Can't convert to str");
   }
 };
 
-exports.to_num = function(arg, ctx) {
+exports.toNum = function(arg, ctx) {
   if (typeof arg == 'number') {
     return arg;
   } else if (typeof arg == 'string') {
     var ret = parseFloat(arg);
     return isNaN(ret) ? 0 : ret;
-  } else if (arg instanceof Array) {
-    return arg.length;
-  } else if (arg.type_object_) {
+  } else if (arg.typeObject_) {
     // TODO - is that a correct way to do that?
     return 0;
   } else if (arg.Num) {
-    return arg.Num(ctx);
-  } else if (arg.$$get_num) {
-    return arg.$$get_num();
-  } else if (arg.$$get_int) {
-    return arg.$$get_int();
+    return arg.Num(ctx, null, arg);
+  } else if (arg.$$getNum) {
+    return arg.$$getNum();
+  } else if (arg.$$getInt) {
+    return arg.$$getInt();
   } else {
     console.log(arg);
     throw "Can't convert to num";
   }
 };
 
-exports.to_int = function(arg, ctx) {
+exports.toInt = function(arg, ctx) {
   if (typeof arg == 'number') {
     return arg | 0;
   } else if (arg.Int) {
@@ -156,41 +174,39 @@ exports.to_int = function(arg, ctx) {
   } else if (typeof arg == 'string') {
     var ret = parseInt(arg);
     return isNaN(ret) ? 0 : ret;
+  } else if (arg.typeObject_) {
+    return 0;
   } else {
     throw "Can't convert to int";
   }
 };
 
-exports.to_bool = function(arg, ctx) {
+exports.toBool = function(arg, ctx) {
   if (typeof arg == 'number') {
     return arg ? 1 : 0;
   } else if (typeof arg == 'string') {
     return arg == '' ? 0 : 1;
-  } else if (arg instanceof Array) {
-    return arg.length == 0 ? 0 : 1;
-  } else if (arg instanceof Hash) {
-    return Object.keys(arg.content).length == 0 ? 0 : 1;
   } else if (arg === undefined || arg == null) {
     return 0;
-  } else if (arg.$$to_bool) {
-    return arg.$$to_bool(ctx);
+  } else if (arg.$$toBool) {
+    return arg.$$toBool(ctx);
+  } else if (typeof arg == 'function') {
+    // needed for continuations
+    return 1;
   } else {
     throw "Can't decide if arg is true";
   }
 };
 
-function Ctx(caller_ctx, outer_ctx) {
-  this.caller = caller_ctx;
-  this.outer = outer_ctx;
+function Ctx(callerCtx, outerCtx, callThis, codeRefAttr) {
+  this.caller = callerCtx;
+  this.outer = outerCtx;
+  this.callThis = callThis;
+  this.codeRefAttr = codeRefAttr;
 }
 
-
-function NqpException(msg) {
-  this.msg = msg;
-}
-
-NqpException.prototype.Str = function(ctx, _NAMED) {
-  return this.msg;
+Ctx.prototype.codeRef = function() {
+  return (this.callThis instanceof CodeRef ? this.callThis : this.callThis[this.codeRefAttr]);
 };
 
 Ctx.prototype.propagateException = function(exception) {
@@ -209,22 +225,31 @@ Ctx.prototype.propagateException = function(exception) {
     }
     ctx = ctx.caller;
   }
-  throw exception.msg;
+  throw exception.message;
+};
+
+Ctx.prototype.catchException = function(exception) {
+  this.exception = exception;
+  this.CATCH();
 };
 
 Ctx.prototype.rethrow = function(exception) {
-  exception.caught.caller.propagateException(exception);
+  this.propagateException(exception);
 };
 
 Ctx.prototype.die = function(msg) {
-  this.propagateException(new NqpException(msg));
+  this.propagateException(new NQPException(msg));
 };
 
 Ctx.prototype.resume = function(exception) {
   exception.resume = true;
 };
 
-Ctx.prototype.lookup_dynamic = function(name) {
+Ctx.prototype.throw = function(exception) {
+  this.propagateException(exception);
+};
+
+Ctx.prototype.lookupDynamic = function(name) {
   var ctx = this;
   while (ctx) {
     if (ctx.hasOwnProperty(name)) {
@@ -237,7 +262,7 @@ Ctx.prototype.lookup_dynamic = function(name) {
      nqp code usually fallbacks to looking up of global */
 };
 
-Ctx.prototype.lookup_dynamic_from_caller = function(name) {
+Ctx.prototype.lookupDynamicFromCaller = function(name) {
   var ctx = this.caller;
   while (ctx) {
     if (ctx.hasOwnProperty(name)) {
@@ -250,7 +275,22 @@ Ctx.prototype.lookup_dynamic_from_caller = function(name) {
      nqp code usually fallbacks to looking up of global */
 };
 
-Ctx.prototype.lookup = function(name, value) {
+Ctx.prototype.lookupFromSomeCaller = function(name) {
+  var currentCallerCtx = this.caller;
+  while (currentCallerCtx) {
+    var currentCtx = currentCallerCtx;
+    while (currentCtx) {
+      if (currentCtx.hasOwnProperty(name)) {
+        return currentCtx[name];
+      }
+      currentCtx = currentCtx.outer;
+    }
+    currentCallerCtx = currentCallerCtx.caller;
+  }
+  return null;
+};
+
+Ctx.prototype.lookup = function(name) {
   var ctx = this;
   while (ctx) {
     if (ctx.hasOwnProperty(name)) {
@@ -258,7 +298,16 @@ Ctx.prototype.lookup = function(name, value) {
     }
     ctx = ctx.outer;
   }
-  throw "Can't lookup: " + name;
+  /* Rakudo depends on returning null when we can't lookup a lexical */
+  return null;
+};
+
+Ctx.prototype.$$atkey = function(key) {
+  return this.lookup(key);
+};
+
+Ctx.prototype.$$bindkey = function(key, value) {
+  this[key] = value;
 };
 
 Ctx.prototype.bind = function(name, value) {
@@ -273,7 +322,7 @@ Ctx.prototype.bind = function(name, value) {
   throw "Can't bind: " + name;
 };
 
-Ctx.prototype.bind_dynamic = function(name, value) {
+Ctx.prototype.bindDynamic = function(name, value) {
   var ctx = this;
   while (ctx) {
     if (ctx.hasOwnProperty(name)) {
@@ -303,7 +352,7 @@ if (!Math.imul) {
 }
 
 // Placeholder
-exports.top_context = function() {
+exports.topContext = function() {
   return null;
 };
 
@@ -360,36 +409,6 @@ exports.Next = function(label) {
   this.label = label;
 };
 
-function WrappedArray(array) {
-  this.array = array;
-}
-
-WrappedArray.prototype.push = function(ctx, _NAMED, element) {
-  this.array.push(element);
-  return element;
-};
-
-WrappedArray.prototype.unshift = function(ctx, _NAMED, element) {
-  this.array.unshift(element);
-  return element;
-};
-
-WrappedArray.prototype.shift = function(ctx, _NAMED) {
-  return this.array.shift();
-};
-
-WrappedArray.prototype.pop = function(ctx, _NAMED) {
-  return this.array.pop();
-};
-
-exports.wrapObj = function(obj) {
-  if (obj instanceof Array) {
-    return new WrappedArray(obj);
-  } else {
-    return obj;
-  }
-};
-
 /* For debugging purposes */
 exports.dumpObj = function(obj) {
   var seen = [];
@@ -405,19 +424,31 @@ exports.dumpObj = function(obj) {
 };
 
 exports.NYI = function(msg) {
-    console.trace(msg);
-    return null;
-};
-
-/* HACK - needed until we handle types on attributes */
-exports.intAttrHack = function(attrValue) {
-  if (attrValue instanceof exports.NQPInt) {
-    return attrValue.value;
-  } else {
-    return attrValue;
-  }
+  console.trace(msg);
+  return null;
 };
 
 exports.args = function(module) {
   return require.main === module ? process.argv.slice(1) : [];
 };
+
+function runCPS(thunk_) {
+  var thunk = thunk_;
+  while (thunk) {
+    thunk = thunk();
+  }
+}
+
+exports.runCPS = runCPS;
+exports.NQPException = NQPException;
+
+exports.wrapException = function(e) {
+  console.log(e);
+  return new NQPException(e.message);
+};
+
+function ControlReturn(payload) {
+  this.payload = payload;
+}
+
+exports.ControlReturn = ControlReturn;

@@ -10,6 +10,7 @@ class RubyishClassHOW {
     has $!isa;
     has %!methods;
 
+    #| define a new class
     method new_type(:$name!, :$isa?) {
         nqp::die("duplicate class definition: $name")
             if %CLASSES{ $name };
@@ -20,6 +21,7 @@ class RubyishClassHOW {
         nqp::newtype($obj, 'HashAttrStore');
     }
 
+    #| add a named method to a class
     method add_method($obj, $name, $code) {
         nqp::die("This class already has a method named " ~ $name)
             if nqp::existskey(%!methods, $name);
@@ -27,11 +29,12 @@ class RubyishClassHOW {
         %!methods{$name} := $code;
     }
 
+    #| find a named method in a class or its parents
+    #| a '^' prefix, skips the current class, starting at the parent
     method find_method($obj, $name) {
         my $method;
 
         if nqp::substr($name, 0, 1) eq '^' {
-            # '^' prefix indicates a superclass lookup
             $name := nqp::substr($name, 1);
         }
         else {
@@ -53,10 +56,10 @@ grammar Rubyish::Grammar is HLL::Grammar {
 
     token TOP {
         :my $*CUR_BLOCK   := QAST::Block.new(QAST::Stmts.new());
-        :my $*TOP_BLOCK   := $*CUR_BLOCK;
-        :my $*CLASS_BLOCK := $*CUR_BLOCK;
-        :my $*IN_TEMPLATE := 0;
-        :my $*IN_PARENS   := 0;
+        :my $*TOP_BLOCK   := $*CUR_BLOCK; # global top-level block
+        :my $*CLASS_BLOCK := $*CUR_BLOCK; # out class block
+        :my $*IN_TEMPLATE := 0;           # true, if in a template
+        :my $*IN_PARENS   := 0;           # true, if in a parentheised list (signature etc)
         :my %*SYM;                # symbols in current scope
         :my %*SYM-GBL;            # globals and package variables
         :my %*SYM-CLASS;          # class-inherited methods
@@ -68,10 +71,12 @@ grammar Rubyish::Grammar is HLL::Grammar {
     rule separator       { ';' | \n <!after continuation> }
     token continuation   { \\ \n }
 
+    #| a list of statements and/or template expressions
     rule stmtlist {
         [ <stmt=.stmtish>? ] *%% [<.separator>|<stmt=.template-chunk>]
     }
 
+    #| a single statement, plus optional modifier
     token stmtish {:s<hs>
         <stmt> [ <modifier> <EXPR>]?
     }
@@ -80,25 +85,28 @@ grammar Rubyish::Grammar is HLL::Grammar {
 
     proto token stmt {*}
 
+    #| function, or method definition
     token stmt:sym<def> {:s
-        :my %sym-save := nqp::clone(%*SYM);
+        :my %*inner-sym := nqp::clone(%*SYM);
         :my $*DEF;
 
         'def' ~ 'end' <defbody> {
-            %sym-save{$*DEF} := %*SYM{$*DEF};
-            %*SYM := %sym-save;
+            %*SYM{$*DEF} := %*inner-sym{$*DEF};
         }
     }
 
     rule defbody {
+        :my %*SYM := %*inner-sym;
         :my $*CUR_BLOCK := QAST::Block.new(QAST::Stmts.new());
         <operation> {
             $*DEF := ~$<operation>;
             if $*IN_CLASS {
+                # if we're in a class, we're defining a method ...
                 %*SYM{$*DEF} := 'method';
                 %*SYM<self> := 'var';
             }
             else {
+                # ... otherwise it's a function
                 %*SYM{$*DEF} := 'func';
             }
         }
@@ -108,6 +116,7 @@ grammar Rubyish::Grammar is HLL::Grammar {
 
     rule comma { [','|'=>'] }
 
+    #| a signature; for a method, function or closure
     rule signature {
         :my $*IN_PARENS := 1;
         [ <param> | '*' <slurpy=.param> | '&' <func=.param> ] +% ','
@@ -119,17 +128,17 @@ grammar Rubyish::Grammar is HLL::Grammar {
         }
     }
 
+    #| a class definition
     token stmt:sym<class> {
         :my $*IN_CLASS := 1;
         :my @*METHODS;
-        :my %sym-save := nqp::clone(%*SYM);
+        :my %*inner-sym := nqp::clone(%*SYM);
 
-        [<sym> \h+] ~ [\h* 'end'] <classbody> {
-            %*SYM := %sym-save
-        }
+        [<sym> \h+] ~ [\h* 'end'] <classbody>
     }
 
     rule classbody {
+        :my %*SYM := %*inner-sym;
         :my $*CUR_BLOCK   := QAST::Block.new(QAST::Stmts.new());
         :my $*CLASS_BLOCK := $*CUR_BLOCK;
 
@@ -149,7 +158,7 @@ grammar Rubyish::Grammar is HLL::Grammar {
         <closure>
     }
 
-    our %builtins;
+    our %builtins; #| functions that map directly to nqp ops
     BEGIN {
         %builtins := nqp::hash(
             'abort',  'die',
@@ -163,6 +172,7 @@ grammar Rubyish::Grammar is HLL::Grammar {
             );
     }
 
+    #| a call to a function or method
     token term:sym<call> {
         <!keyword>
         <operation> ['(' ~ ')' <call-args=.paren-args>? <code-block>?
@@ -170,6 +180,7 @@ grammar Rubyish::Grammar is HLL::Grammar {
                     ]
     }
 
+    #| a call to the super-method (aka callsame)
     token term:sym<super> {
         'super' ['(' ~ ')' <call-args=.paren-args>? <code-block>?
                 |:s <call-args>?
@@ -180,10 +191,12 @@ grammar Rubyish::Grammar is HLL::Grammar {
         ]
     }
 
+    #| call to an nqp operation
     token term:sym<nqp-op> {
         'nqp::'<ident> ['(' ~ ')' <call-args=.paren-args>? | <call-args>? ]
     }
 
+    #| quoted words, e.g.: %w<a b c>
     token term:sym<quote-words> {
         \%w <?before [.]> <quote_EXPR: ':q', ':w'>
     }
@@ -207,6 +220,8 @@ grammar Rubyish::Grammar is HLL::Grammar {
         ['new' \h+ <ident> | <ident> '.' 'new'] ['(' ~ ')' <call-args=.paren-args>?]?
     }
 
+    # process a variable name, e.g.: localvar $global @attr Pkg::Var
+    # the first reference to a local or global variable must be an assignment
     token var {
         :my $*MAYBE_DECL := 0;
         \+?
@@ -227,26 +242,34 @@ grammar Rubyish::Grammar is HLL::Grammar {
     proto token value {*}
     token value:sym<string>  {<strings>}
     token strings            {:s<hs> <string> <strings>? }
-    token string             { <?[']> <quote_EXPR: ':q'>
-                             | <?["]> <quote_EXPR: ':qq'>
-                             | \%[ q <?before [.]> <quote_EXPR: ':q'>
-                                 | Q <?before [.]> <quote_EXPR: ':qq'>
+    token string             { <?[']> <quote_EXPR: ':q'>               # 'non-interpolating'
+                             | <?["]> <quote_EXPR: ':qq'>              # "interpolating#{42}"
+                             | \%[ q <?before [.]> <quote_EXPR: ':q'>  # %q<non-interpolating>
+                                 | Q <?before [.]> <quote_EXPR: ':qq'> # %Q<interpolating#{42}>
                                  ]
                              }
 
     token value:sym<heredoc> {'<<'<heredoc>}
 
     proto token heredoc {*}
+    #| non-interpolating heredoc
     token heredoc:sym<literal>  {[$<marker>=<.ident> | \' $<marker>=<- [\' \n]>+? \' ]\n
                                      $<text>=.*?
                                  \n$<marker>$$
     }
 
-    token heredoc-line       {\n? [<!before ['#{']> \N]+ | \n }
+    #| interpolating heredoc
     token heredoc:sym<interp> {\" $<marker>=<- [\" \n]>+? \"\n
                                    [<text=.interp> | <text=.heredoc-line> ]*?
                                \n$<marker>$$
     }
+    token heredoc-line       {\n? [<!before ['#{']> \N]+ | \n }
+
+    #| Interpolation
+    token interp      { '#{' ~ '}' [ [:s<hs> <stmtlist> ]
+                                    || <panic('string interpolation error')> ]
+                       }
+    token quote_escape:sym<#{ }> { <?quotemod_check('s')> <interp>  }
 
     token paren-list {
          :my $*IN_PARENS := 1;
@@ -260,12 +283,6 @@ grammar Rubyish::Grammar is HLL::Grammar {
     token value:sym<nil>     { <sym> }
     token value:sym<true>    { <sym> }
     token value:sym<false>   { <sym> }
-
-    # Interpolation
-    token interp      { '#{' ~ '}' [ [:s<hs> <stmtlist> ]
-                                    || <panic('string interpolation error')> ]
-                       }
-    token quote_escape:sym<#{ }> { <?quotemod_check('s')> <interp>  }
 
     # Reserved words.
     token keyword {
@@ -355,11 +372,11 @@ grammar Rubyish::Grammar is HLL::Grammar {
     token infix:sym<&&>   { <sym>  <O('%logical_and, :op<if>')> }
     token infix:sym<||>   { <sym>  <O('%logical_or,  :op<unless>')> }
 
-    token infix:sym<? :> {:s '?' <EXPR('i=')>
+    token infix:sym<? :>  {:s '?' <EXPR('i=')>
                              ':' <O('%conditional, :reducecheck<ternary>, :op<if>')>
     }
 
-    token bind-op     {'='<![>]>}
+    token bind-op       {'='<![>=]>}
     token infix:sym<=>  { <.bind-op> <O('%assignment, :op<bind>')> }
 
     token prefix:sym<not> { <sym>  <O('%loose_not,     :op<not_i>')> }

@@ -13,6 +13,10 @@ my $MVM_reg_num32           := 5;
 my $MVM_reg_num64           := 6;
 my $MVM_reg_str             := 7;
 my $MVM_reg_obj             := 8;
+my $MVM_reg_uint8           := 17;
+my $MVM_reg_uint16          := 18;
+my $MVM_reg_uint32          := 19;
+my $MVM_reg_uint64          := 20;
 
 class QAST::MASTRegexCompiler {
     # The compiler we're working against.
@@ -160,7 +164,7 @@ class QAST::MASTRegexCompiler {
                 ival(nqp::hintfor($!cursor_type, '$!restart'))),
             op('isconcrete', $i19, $tmp),
             op('bindlex', $*BLOCK.resolve_lexical('$¢'), $cur),
-            op('graphs_s', $eos, $tgt),
+            op('chars', $eos, $tgt),
             op('eq_i', $i0, $one, $i19),
             op('if_i', $i0, $restartlabel),
             op('gt_i', $i0, $pos, $eos),
@@ -500,11 +504,15 @@ class QAST::MASTRegexCompiler {
 	}
         if $node.subtype eq 'ignoremark' || $node.subtype eq 'ignorecase+ignoremark' {
             my $s0 := $!regalloc.fresh_s();
+            my $i1 := $!regalloc.fresh_i();
             merge_ins(@ins, [
                 op('ordbaseat', $i0, %!reg<tgt>, %!reg<pos>),
+                op('lt_i', $i1, $i0, %!reg<zero>),
+                op('if_i', $i1, %!reg<fail>),
                 op('chr', $s0, $i0),
                 op($op, $s0, %!reg<zero>, sval($node[0]), %!reg<fail>),
             ]);
+            $!regalloc.release_register($i1, $MVM_reg_int64);
         }
         else {
             nqp::push(@ins, op($op, %!reg<tgt>, %!reg<pos>, sval($node[0]), %!reg<fail>));
@@ -988,6 +996,21 @@ class QAST::MASTRegexCompiler {
             my $lit := $!regalloc.fresh_s();
             nqp::push(@ins, op('const_s', $lit, sval($node[0])));
             nqp::push(@ins, op('index_s', %!reg<pos>, %!reg<tgt>, $lit, %!reg<pos>));
+            nqp::push(@ins, op('eq_i', $ireg0, %!reg<pos>, %!reg<negone>));
+            $!regalloc.release_register($lit, $MVM_reg_str);
+        }
+        elsif $node.list && $node.subtype eq 'ignorecase' {
+            my $lit := $!regalloc.fresh_s();
+            nqp::push(@ins, op('const_s', $lit, sval(nqp::lc($node[0]))));
+            unless nqp::existskey(%!reg, 'haystacklc') {
+                %!reg<haystacklc> := $!regalloc.fresh_s();
+            }
+            my $no_need_lc := label();
+            nqp::push(@ins, op('isnull_s', $ireg0, %!reg<haystacklc>));
+            nqp::push(@ins, op('unless_i', $ireg0, $no_need_lc));
+            nqp::push(@ins, op('lc', %!reg<haystacklc>, %!reg<tgt>));
+            nqp::push(@ins, $no_need_lc);
+            nqp::push(@ins, op('index_s', %!reg<pos>, %!reg<haystacklc>, $lit, %!reg<pos>));
             nqp::push(@ins, op('eq_i', $ireg0, %!reg<pos>, %!reg<negone>));
             $!regalloc.release_register($lit, $MVM_reg_str);
         }

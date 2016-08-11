@@ -492,6 +492,10 @@ class QRegex::P6Regex::Actions is HLL::Actions {
             QAST::Regex.new( $<charspec>.ast, :rxtype('literal'), :node($/) )
     }
 
+    method cclass_backslash:sym<0>($/) {
+        make QAST::Regex.new( "\0", :rxtype('literal'), :node($/) );
+    }
+
     method cclass_backslash:sym<any>($/) {
         my $qast := QAST::Regex.new( ~$/ , :rxtype('literal'), :node($/) );
         make $qast;
@@ -848,11 +852,13 @@ class QRegex::P6Regex::Actions is HLL::Actions {
         }
         $block.push($qast);
 
-        if nqp::existskey(%rest, 'cursor_type') {
-            $qast.cursor_type(%rest<cursor_type>);
-        }
+        self.set_cursor_type($qast);
         
         $block;
+    }
+
+    # A hook point that subclasses can set to the cursor type
+    method set_cursor_type($qast) {
     }
 
     sub capnames($ast, int $count) {

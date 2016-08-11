@@ -11,7 +11,6 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.ProcessBuilder.Redirect;
 import java.lang.Thread;
-import java.lang.NoSuchFieldException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
@@ -26,18 +25,17 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap;
-import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -98,6 +96,8 @@ import org.perl6.nqp.sixmodel.reprs.MultiCacheInstance;
 import org.perl6.nqp.sixmodel.reprs.NFA;
 import org.perl6.nqp.sixmodel.reprs.NFAInstance;
 import org.perl6.nqp.sixmodel.reprs.NFAStateInfo;
+import org.perl6.nqp.sixmodel.reprs.NativeCallBody;
+import org.perl6.nqp.sixmodel.reprs.NativeCallInstance;
 import org.perl6.nqp.sixmodel.reprs.NativeRefInstanceAttribute;
 import org.perl6.nqp.sixmodel.reprs.NativeRefInstanceIntLex;
 import org.perl6.nqp.sixmodel.reprs.NativeRefInstanceNumLex;
@@ -109,6 +109,7 @@ import org.perl6.nqp.sixmodel.reprs.P6int;
 import org.perl6.nqp.sixmodel.reprs.P6str;
 import org.perl6.nqp.sixmodel.reprs.P6num;
 import org.perl6.nqp.sixmodel.reprs.P6OpaqueREPRData;
+import org.perl6.nqp.sixmodel.reprs.P6OpaqueBaseInstance;
 import org.perl6.nqp.sixmodel.reprs.ReentrantMutexInstance;
 import org.perl6.nqp.sixmodel.reprs.SCRefInstance;
 import org.perl6.nqp.sixmodel.reprs.SemaphoreInstance;
@@ -164,20 +165,32 @@ public final class Ops {
     public static final int STAT_PLATFORM_BLOCKS    = -7;
 
     public static long stat(String filename, long status) {
+        return stat_internal(filename, status);
+    }
+
+    public static long lstat(String filename, long status) {
+        return stat_internal(filename, status, LinkOption.NOFOLLOW_LINKS);
+    }
+
+    public static long stat_internal(String filename, long status, LinkOption ... linkOption) {
         long rval = -1;
 
         switch ((int) status) {
             case STAT_EXISTS:
-                rval = new File(filename).exists() ? 1 : 0;
+                rval = Files.exists(Paths.get(filename), linkOption) ? 1 : 0;
                 break;
 
             case STAT_FILESIZE:
-                rval = new File(filename).length();
+                try {
+                    rval = Files.readAttributes(Paths.get(filename), BasicFileAttributes.class, linkOption).size();
+                } catch (Exception e) {
+                    rval = -1;
+                }
                 break;
 
             case STAT_ISDIR:
                 try {
-                    rval = (Boolean) Files.getAttribute(Paths.get(filename), "basic:isDirectory") ? 1 : 0;
+                    rval = (Boolean) Files.getAttribute(Paths.get(filename), "basic:isDirectory", linkOption) ? 1 : 0;
                 } catch(NoSuchFileException e) {
                     rval = 0;
                 } catch (Exception e) {
@@ -187,7 +200,7 @@ public final class Ops {
 
             case STAT_ISREG:
                 try {
-                    rval = (Boolean) Files.getAttribute(Paths.get(filename), "basic:isRegularFile") ? 1 : 0;
+                    rval = (Boolean) Files.getAttribute(Paths.get(filename), "basic:isRegularFile", linkOption) ? 1 : 0;
                 } catch(NoSuchFileException e) {
                     rval = 0;
                 } catch (Exception e) {
@@ -197,7 +210,7 @@ public final class Ops {
 
             case STAT_ISDEV:
                 try {
-                    rval = (Boolean) Files.getAttribute(Paths.get(filename), "basic:isOther") ? 1 : 0;
+                    rval = (Boolean) Files.getAttribute(Paths.get(filename), "basic:isOther", linkOption) ? 1 : 0;
                 } catch(NoSuchFileException e) {
                     rval = 0;
                 } catch (Exception e) {
@@ -207,7 +220,7 @@ public final class Ops {
 
             case STAT_CREATETIME:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "basic:creationTime")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "basic:creationTime", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -215,7 +228,7 @@ public final class Ops {
 
             case STAT_ACCESSTIME:
                 try {
-                    rval = ((FileTime) Files.getAttribute(Paths.get(filename), "basic:lastAccessTime")).to(TimeUnit.SECONDS);
+                    rval = ((FileTime) Files.getAttribute(Paths.get(filename), "basic:lastAccessTime", linkOption)).to(TimeUnit.SECONDS);
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -223,7 +236,7 @@ public final class Ops {
 
             case STAT_MODIFYTIME:
                 try {
-                    rval = ((FileTime) Files.getAttribute(Paths.get(filename), "basic:lastModifiedTime")).to(TimeUnit.SECONDS);
+                    rval = ((FileTime) Files.getAttribute(Paths.get(filename), "basic:lastModifiedTime", linkOption)).to(TimeUnit.SECONDS);
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -231,7 +244,7 @@ public final class Ops {
 
             case STAT_CHANGETIME:
                 try {
-                    rval = ((FileTime) Files.getAttribute(Paths.get(filename), "unix:ctime")).to(TimeUnit.SECONDS);
+                    rval = ((FileTime) Files.getAttribute(Paths.get(filename), "unix:ctime", linkOption)).to(TimeUnit.SECONDS);
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -243,7 +256,7 @@ public final class Ops {
 
             case STAT_UID:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:uid")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:uid", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -251,7 +264,7 @@ public final class Ops {
 
             case STAT_GID:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:gid")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:gid", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -269,7 +282,7 @@ public final class Ops {
 
             case STAT_PLATFORM_DEV:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:dev")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:dev", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -277,7 +290,7 @@ public final class Ops {
 
             case STAT_PLATFORM_INODE:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:ino")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:ino", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -285,7 +298,7 @@ public final class Ops {
 
             case STAT_PLATFORM_MODE:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:mode")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:mode", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -293,7 +306,7 @@ public final class Ops {
 
             case STAT_PLATFORM_NLINKS:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:nlink")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:nlink", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -301,7 +314,7 @@ public final class Ops {
 
             case STAT_PLATFORM_DEVTYPE:
                 try {
-                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:rdev")).longValue();
+                    rval = ((Number) Files.getAttribute(Paths.get(filename), "unix:rdev", linkOption)).longValue();
                 } catch (Exception e) {
                     rval = -1;
                 }
@@ -318,6 +331,41 @@ public final class Ops {
         }
 
         return rval;
+    }
+
+    public static double stat_time(String filename, long status) {
+        return stat_time_internal(filename, status);
+    }
+
+    public static double lstat_time(String filename, long status) {
+        return stat_time_internal(filename, status, LinkOption.NOFOLLOW_LINKS);
+    }
+
+    protected static double stat_time_internal(String filename, long status, LinkOption... linkOption) {
+        String attrName;
+        switch ((int) status) {
+        case STAT_CREATETIME:
+            attrName = "basic:creationTime";
+            break;
+        case STAT_ACCESSTIME:
+            attrName = "basic:lastAccessTime";
+            break;
+        case STAT_MODIFYTIME:
+            attrName = "basic:lastModifiedTime";
+            break;
+        case STAT_CHANGETIME:
+            attrName = "unix:ctime";
+            break;
+        default:
+            return -1;
+        }
+
+        try {
+            FileTime ft = ((FileTime) Files.getAttribute(Paths.get(filename), attrName, linkOption));
+            return ft.to(TimeUnit.NANOSECONDS) / 1000000000;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     public static SixModelObject open(String path, String mode, ThreadContext tc) {
@@ -694,6 +742,21 @@ public final class Ops {
         }
     }
 
+    public static String readcharsfh(SixModelObject obj, long chars, ThreadContext tc) {
+        if (obj instanceof IOHandleInstance) {
+            IOHandleInstance h = (IOHandleInstance)obj;
+            if (h.handle instanceof IIOSyncReadable)
+                return ((IIOSyncReadable)h.handle).readchars(tc, (int)chars);
+            else
+                throw ExceptionHandling.dieInternal(tc,
+                    "This handle does not support readchars");
+        }
+        else {
+            throw ExceptionHandling.dieInternal(tc,
+                "readcharsfh requires an object with the IOHandle REPR");
+        }
+    }
+
     public static String readlinefh(SixModelObject obj, ThreadContext tc) {
         if (obj instanceof IOHandleInstance) {
             IOHandleInstance h = (IOHandleInstance)obj;
@@ -863,6 +926,11 @@ public final class Ops {
         return -1;
     }
 
+    public static long filenofh(SixModelObject obj, ThreadContext tc) {
+        /* XXX Implement this */
+        return -1;
+    }
+
     public static Set<PosixFilePermission> modeToPosixFilePermission(long mode) {
         Set<PosixFilePermission> perms = EnumSet.noneOf(PosixFilePermission.class);
         if ((mode & 0001) != 0) perms.add(PosixFilePermission.OTHERS_EXECUTE);
@@ -944,7 +1012,7 @@ public final class Ops {
         Path before_o = Paths.get(before);
         Path after_o = Paths.get(after);
         try {
-            Files.move(before_o, after_o);
+            Files.move(before_o, after_o, StandardCopyOption.REPLACE_EXISTING);
         }
         catch (Exception e) {
             die_s(IOExceptionMessages.message(e), tc);
@@ -1161,7 +1229,7 @@ public final class Ops {
                 IOHandleInstance ioh = (IOHandleInstance)obj;
                 if (ioh.dirstrm != null && ioh.diri != null) {
                     if (ioh.diri.hasNext()) {
-                        return ioh.diri.next().toString();
+                        return ioh.diri.next().getFileName().toString();
                     } else {
                         return null;
                     }
@@ -2159,6 +2227,44 @@ public final class Ops {
             throw ExceptionHandling.dieInternal(tc, "capturehasnameds requires a CallCapture");
         }
     }
+    public static SixModelObject capturenamedshash(SixModelObject obj, ThreadContext tc) {
+        if (obj instanceof CallCaptureInstance) {
+            CallCaptureInstance cc = (CallCaptureInstance)obj;
+
+            SixModelObject hashType = tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.hashType;
+            SixModelObject res = hashType.st.REPR.allocate(tc, hashType.st);
+
+            for (String name : cc.descriptor.nameMap.keySet()) {
+                Integer flagged = cc.descriptor.nameMap.get(name);
+                int i = flagged >> 3;
+
+                SixModelObject arg = null;
+
+                if ((flagged & CallSiteDescriptor.ARG_INT) != 0) {
+                    arg = box_i((long)cc.args[i],
+                        tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.intBoxType, tc);
+                }
+                else if ((flagged & CallSiteDescriptor.ARG_OBJ) != 0) {
+                    arg = (SixModelObject)cc.args[i];
+                }
+                else if ((flagged & CallSiteDescriptor.ARG_STR) != 0) {
+                    arg = box_s((String)cc.args[i],
+                        tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.strBoxType, tc);
+                }
+                else if ((flagged & CallSiteDescriptor.ARG_NUM) != 0) {
+                    arg = box_n((double)cc.args[i],
+                        tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.numBoxType, tc);
+                }
+
+                res.bind_key_boxed(tc, name, arg);
+            }
+
+            return res;
+        }
+        else {
+            throw ExceptionHandling.dieInternal(tc, "capturenamedshash requires a CallCapture");
+        }
+    }
     public static long capturehasnameds(SixModelObject obj, ThreadContext tc) {
         if (obj instanceof CallCaptureInstance) {
             CallCaptureInstance cc = (CallCaptureInstance)obj;
@@ -2199,6 +2305,7 @@ public final class Ops {
     public static final CallSiteDescriptor typeCheckCallSite = new CallSiteDescriptor(new byte[] { CallSiteDescriptor.ARG_OBJ, CallSiteDescriptor.ARG_OBJ, CallSiteDescriptor.ARG_OBJ }, null);
     public static final CallSiteDescriptor howObjCallSite = new CallSiteDescriptor(new byte[] { CallSiteDescriptor.ARG_OBJ, CallSiteDescriptor.ARG_OBJ }, null);
     public static final CallSiteDescriptor parameterizeCallSite = new CallSiteDescriptor(new byte[] { CallSiteDescriptor.ARG_OBJ, CallSiteDescriptor.ARG_OBJ }, null);
+    public static final CallSiteDescriptor intIntCallSite = new CallSiteDescriptor(new byte[] { CallSiteDescriptor.ARG_INT, CallSiteDescriptor.ARG_INT }, null);
     public static void invokeLexotic(SixModelObject invokee, CallSiteDescriptor csd, Object[] args, ThreadContext tc) {
         LexoticException throwee = tc.theLexotic;
         throwee.target = ((LexoticInstance)invokee).target;
@@ -2324,16 +2431,6 @@ public final class Ops {
             return null;
     }
 
-    /* Basic 6model operations. */
-    public static SixModelObject what(SixModelObject o) {
-        return o.st.WHAT;
-    }
-    public static SixModelObject how(SixModelObject o) {
-        return o.st.HOW;
-    }
-    public static SixModelObject who(SixModelObject o) {
-        return o.st.WHO;
-    }
     public static long where(SixModelObject o) {
         return o.hashCode();
     }
@@ -2351,7 +2448,7 @@ public final class Ops {
         return decont(o, tc).st.WHO;
     }
     public static long where(SixModelObject o, ThreadContext tc) {
-        return o.hashCode();
+        return decont(o, tc).hashCode();
     }
     public static SixModelObject setwho(SixModelObject o, SixModelObject who, ThreadContext tc) {
         decont(o, tc).st.WHO = who;
@@ -2469,6 +2566,9 @@ public final class Ops {
     public static String reprname(SixModelObject obj) {
         return obj.st.REPR.name;
     }
+    public static String reprname(SixModelObject obj, ThreadContext tc) {
+        return decont(obj, tc).st.REPR.name;
+    }
     public static SixModelObject newtype(SixModelObject how, String reprname, ThreadContext tc) {
         return REPRRegistry.getByName(reprname).type_object_for(tc, decont(how, tc));
     }
@@ -2515,7 +2615,7 @@ public final class Ops {
         return obj;
     }
     public static long objprimspec(SixModelObject obj, ThreadContext tc) {
-        return obj.st.REPR.get_storage_spec(tc, obj.st).boxed_primitive;
+        return obj == null ? 0 : obj.st.REPR.get_storage_spec(tc, obj.st).boxed_primitive;
     }
     public static SixModelObject setinvokespec(SixModelObject obj, SixModelObject ch,
             String name, SixModelObject invocationHandler, ThreadContext tc) {
@@ -2625,7 +2725,41 @@ public final class Ops {
 
     /* Attribute operations. */
     public static SixModelObject getattr(SixModelObject obj, SixModelObject ch, String name, ThreadContext tc) {
-        return obj.get_attribute_boxed(tc, decont(ch, tc), name, STable.NO_HINT);
+        try {
+            return obj.get_attribute_boxed(tc, decont(ch, tc), name, STable.NO_HINT);
+        }
+        catch (P6OpaqueBaseInstance.BadReferenceRuntimeException badRef) {
+            SixModelObject retval = null;
+            obj.get_attribute_native(tc, decont(ch, tc), name, STable.NO_HINT);
+            if (tc.native_type == ThreadContext.NATIVE_INT) {
+                retval = box_i((long)tc.native_i, tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.intBoxType, tc);
+            }
+            else if (tc.native_type == ThreadContext.NATIVE_NUM) {
+                retval = box_n((double)tc.native_n, tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.numBoxType, tc);
+            }
+            else if (tc.native_type == ThreadContext.NATIVE_STR) {
+                retval = box_s((String)tc.native_s, tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.strBoxType, tc);
+            }
+            else if (tc.native_type == ThreadContext.NATIVE_JVM_OBJ) {
+                int slot = ((P6OpaqueBaseInstance)obj).resolveAttribute(obj.st.WHAT, name);
+                STable attr_st = ((P6OpaqueREPRData) obj.st.REPRData).flattenedSTables[slot];
+                if (attr_st != null) {
+                    retval = attr_st.REPR.allocate(tc, attr_st);
+                    for (Field field : retval.getClass().getDeclaredFields()) {
+                        try {
+                            if (field.getType().isAssignableFrom(tc.native_j.getClass())) {
+                                field.set(retval, tc.native_j);
+                                break;
+                            }
+                        }
+                        catch (IllegalAccessException iae) {
+                            throw ExceptionHandling.dieInternal(tc, "Attribute '" + name + "' couldn't be boxed");
+                        }
+                    }
+                }
+            }
+            return retval;
+        }
     }
     public static long getattr_i(SixModelObject obj, SixModelObject ch, String name, ThreadContext tc) {
         obj.get_attribute_native(tc, decont(ch, tc), name, STable.NO_HINT);
@@ -2649,7 +2783,41 @@ public final class Ops {
             throw ExceptionHandling.dieInternal(tc, "Attribute '" + name + "' is not a native str");
     }
     public static SixModelObject getattr(SixModelObject obj, SixModelObject ch, String name, long hint, ThreadContext tc) {
-        return obj.get_attribute_boxed(tc, decont(ch, tc), name, hint);
+        try {
+            return obj.get_attribute_boxed(tc, decont(ch, tc), name, hint);
+        }
+        catch (P6OpaqueBaseInstance.BadReferenceRuntimeException badRef) {
+            SixModelObject retval = null;
+            obj.get_attribute_native(tc, decont(ch, tc), name, hint);
+            if (tc.native_type == ThreadContext.NATIVE_INT) {
+                retval = box_i((long)tc.native_i, tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.intBoxType, tc);
+            }
+            else if (tc.native_type == ThreadContext.NATIVE_NUM) {
+                retval = box_n((double)tc.native_n, tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.numBoxType, tc);
+            }
+            else if (tc.native_type == ThreadContext.NATIVE_STR) {
+                retval = box_s((String)tc.native_s, tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.strBoxType, tc);
+            }
+            else if (tc.native_type == ThreadContext.NATIVE_JVM_OBJ) {
+                int slot = ((P6OpaqueBaseInstance)obj).resolveAttribute(obj.st.WHAT, name);
+                STable attr_st = ((P6OpaqueREPRData) obj.st.REPRData).flattenedSTables[slot];
+                if (attr_st != null) {
+                    retval = attr_st.REPR.allocate(tc, attr_st);
+                    for (Field field : retval.getClass().getDeclaredFields()) {
+                        try {
+                            if (field.getType().isAssignableFrom(tc.native_j.getClass())) {
+                                field.set(retval, tc.native_j);
+                                break;
+                            }
+                        }
+                        catch (IllegalAccessException iae) {
+                            throw ExceptionHandling.dieInternal(tc, "Attribute '" + name + "' couldn't be boxed");
+                        }
+                    }
+                }
+            }
+            return retval;
+        }
     }
     public static long getattr_i(SixModelObject obj, SixModelObject ch, String name, long hint, ThreadContext tc) {
         obj.get_attribute_native(tc, decont(ch, tc), name, hint);
@@ -3320,6 +3488,11 @@ public final class Ops {
     public static SixModelObject typeparameterat(SixModelObject type, long idx, ThreadContext tc) {
         return typeparameters(type, tc).at_pos_boxed(tc, idx);
     }
+    
+    public static SixModelObject setdebugtypename(SixModelObject type, String debugName, ThreadContext tc) {
+        type.st.debugName = debugName;
+        return type;
+    }
 
     /* Container operations. */
     public static SixModelObject setcontspec(SixModelObject obj, String confname, SixModelObject confarg, ThreadContext tc) {
@@ -3469,25 +3642,32 @@ public final class Ops {
             SixModelObject BOOTHash = tc.gc.BOOTHash;
             SixModelObject hash = BOOTHash.st.REPR.allocate(tc, BOOTHash.st);
 
-            /* TODO: don't cheat and just shove the nulls in. It's enough for
-             * the initial use case of this, though.
-             */
             StaticCodeInfo sci = ((ContextRefInstance)agg).context.codeRef.staticInfo;
             if (sci.oLexicalNames != null) {
                 for (int i = 0; i < sci.oLexicalNames.length; i++)
-                    hash.bind_key_boxed(tc, sci.oLexicalNames[i], null);
+                    hash.bind_key_boxed(tc, sci.oLexicalNames[i],
+                        ((ContextRefInstance)agg).at_key_boxed(tc, sci.oLexicalNames[i]));
             }
             if (sci.iLexicalNames != null) {
-                for (int i = 0; i < sci.iLexicalNames.length; i++)
-                    hash.bind_key_boxed(tc, sci.iLexicalNames[i], null);
+                for (int i = 0; i < sci.iLexicalNames.length; i++) {
+                    ((ContextRefInstance)agg).at_key_boxed(tc, sci.iLexicalNames[i]);
+                    hash.bind_key_boxed(tc, sci.iLexicalNames[i],
+                        box_i(tc.native_i, ((ContextRefInstance)agg).context.codeRef.staticInfo.compUnit.hllConfig.intBoxType, tc));
+                }
             }
             if (sci.nLexicalNames != null) {
-                for (int i = 0; i < sci.nLexicalNames.length; i++)
-                    hash.bind_key_boxed(tc, sci.nLexicalNames[i], null);
+                for (int i = 0; i < sci.nLexicalNames.length; i++) {
+                    ((ContextRefInstance)agg).at_key_boxed(tc, sci.nLexicalNames[i]);
+                    hash.bind_key_boxed(tc, sci.nLexicalNames[i],
+                        box_n(tc.native_n, ((ContextRefInstance)agg).context.codeRef.staticInfo.compUnit.hllConfig.numBoxType, tc));
+                }
             }
             if (sci.sLexicalNames != null) {
-                for (int i = 0; i < sci.sLexicalNames.length; i++)
-                    hash.bind_key_boxed(tc, sci.sLexicalNames[i], null);
+                for (int i = 0; i < sci.sLexicalNames.length; i++) {
+                    ((ContextRefInstance)agg).at_key_boxed(tc, sci.sLexicalNames[i]);
+                    hash.bind_key_boxed(tc, sci.sLexicalNames[i],
+                        box_s(tc.native_s, ((ContextRefInstance)agg).context.codeRef.staticInfo.compUnit.hllConfig.strBoxType, tc));
+                }
             }
 
             return iter(hash, tc);
@@ -3745,8 +3925,11 @@ public final class Ops {
         return val.toUpperCase();
     }
 
-    public static String x(String val, long count) {
-        StringBuilder retval = new StringBuilder();
+    public static String x(String val, long count, ThreadContext tc) {
+        if (count < 0)
+            throw ExceptionHandling.dieInternal(tc, "repeat count (" + count + ") cannot be negative");
+
+        StringBuilder retval = new StringBuilder((int)Math.min(Integer.MAX_VALUE, val.length() * count));
         for (long ii = 1; ii <= count; ii++) {
             retval.append(val);
         }
@@ -5165,6 +5348,19 @@ public final class Ops {
         }
         return handle;
     }
+    public static SixModelObject cancelnotify(SixModelObject handle, SixModelObject queue,
+            SixModelObject schedulee, ThreadContext tc) {
+        AsyncTaskInstance task = (AsyncTaskInstance) handle;
+        if (!(queue instanceof ConcBlockingQueueInstance))
+            throw ExceptionHandling.dieInternal(tc, "notifycancel's second argument should have REPR ConcBlockingQueue");
+        if (task.handle instanceof IIOCancelable) {
+            ((IIOCancelable)task.handle).cancel(tc);
+            ((ConcBlockingQueueInstance)queue).queue.add(schedulee);
+        } else {
+            throw ExceptionHandling.dieInternal(tc, "This handle does not support cancel");
+        }
+        return handle;
+    }
 
     /* Exception related. */
     public static void die_s_c(String msg, ThreadContext tc) {
@@ -5178,7 +5374,11 @@ public final class Ops {
         ExceptionHandling.handlerDynamic(tc, ExceptionHandling.EX_CAT_CATCH, true, exObj);
     }
     public static void throwcatdyn_c(long category, ThreadContext tc) {
-        ExceptionHandling.handlerDynamic(tc, category, false, null);
+        SixModelObject exType = tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.exceptionType;
+        VMExceptionInstance exObj = (VMExceptionInstance)exType.st.REPR.allocate(tc, exType.st);
+        exObj.origin = tc.curFrame;
+        exObj.category = category;
+        ExceptionHandling.handlerDynamic(tc, category, false, exObj);
     }
     public static SixModelObject exception(ThreadContext tc) {
         int numHandlers = tc.handlers.size();
@@ -5339,6 +5539,25 @@ public final class Ops {
     public static SixModelObject resume(SixModelObject obj, ThreadContext tc) {
         throw theResumer;
     }
+    public static void _throwpayloadlex_c(long category, SixModelObject payload, ThreadContext tc) {
+        SixModelObject exType = tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.exceptionType;
+        VMExceptionInstance exObj = (VMExceptionInstance)exType.st.REPR.allocate(tc, exType.st);
+        exObj.category = category;
+        exObj.origin = tc.curFrame;
+        tc.lastPayload = payload;
+        ExceptionHandling.handlerLexical(tc, category, exObj, false);
+    }
+    public static void _throwpayloadlexcaller_c(long category, SixModelObject payload, ThreadContext tc) {
+        SixModelObject exType = tc.curFrame.codeRef.staticInfo.compUnit.hllConfig.exceptionType;
+        VMExceptionInstance exObj = (VMExceptionInstance)exType.st.REPR.allocate(tc, exType.st);
+        exObj.category = category;
+        exObj.origin = tc.curFrame;
+        tc.lastPayload = payload;
+        ExceptionHandling.handlerLexical(tc, category, exObj, true);
+    }
+    public static SixModelObject lastexpayload(ThreadContext tc) {
+        return tc.lastPayload;
+    }
 
     /* compatibility shims for next bootstrap TODO */
     public static String die_s(String msg, ThreadContext tc) {
@@ -5437,6 +5656,8 @@ public final class Ops {
             config.numPosRef = configHash.at_key_boxed(tc, "num_pos_ref");
         if (configHash.exists_key(tc, "str_pos_ref") != 0)
             config.strPosRef = configHash.at_key_boxed(tc, "str_pos_ref");
+        if (configHash.exists_key(tc, "lexical_handler_not_found_error") != 0)
+            config.lexicalHandlerNotFoundError = configHash.at_key_boxed(tc, "lexical_handler_not_found_error");
         return configHash;
     }
     public static SixModelObject getcomp(String name, ThreadContext tc) {
@@ -5477,6 +5698,18 @@ public final class Ops {
     public static String loadbytecode(String filename, ThreadContext tc) {
         new LibraryLoader().load(tc, filename);
         return filename;
+    }
+    public static SixModelObject loadbytecodebuffer(SixModelObject buffer, ThreadContext tc) throws Exception {
+        if (buffer instanceof VMArrayInstance_i8) {
+            new LibraryLoader().load(tc, ((VMArrayInstance_i8)buffer).slots);
+        }
+        else if (buffer instanceof VMArrayInstance_u8) {
+            new LibraryLoader().load(tc, ((VMArrayInstance_u8)buffer).slots);
+        }
+        else {
+            throw new RuntimeException("Must pass a uint8 or int8 buffer to loadbytecodebuffer");
+        }
+        return buffer;
     }
     public static SixModelObject settypehll(SixModelObject type, String language, ThreadContext tc) {
         type.st.hllOwner = tc.gc.getHLLConfigFor(language);
@@ -6004,6 +6237,21 @@ public final class Ops {
         }
     }
 
+    public static long coerce_n2i(double in) {
+        if (in == Double.POSITIVE_INFINITY
+        ||  in == Double.NEGATIVE_INFINITY
+        ||  in != in) {
+            return Long.MIN_VALUE;
+        }
+        else {
+            return new Double(in).longValue();
+        }
+    }
+
+    public static double coerce_i2n(long in) {
+        return new Long(in).doubleValue();
+    }
+
     /* Long literal workaround. */
     public static String join_literal(String[] parts) {
         StringBuilder retval = new StringBuilder(parts.length * 65535);
@@ -6186,8 +6434,8 @@ public final class Ops {
         return makeBI(tc, type, random);
     }
     
-    public static int pow_i(int a, int b) {
-        return (int)Math.pow(a, b);
+    public static long pow_i(long a, long b) {
+        return (long)Math.pow(a, b);
     }
 
     public static double pow_n(double a, double b) {

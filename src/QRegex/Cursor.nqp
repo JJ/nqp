@@ -115,19 +115,13 @@ role NQPCursorRole is export {
         $caps;
     }
 
-    method !cursor_init($orig, :$p = 0, :$c, :$shared) {
+    method !cursor_init($orig, :$p = 0, :$c, :$shared, *%ignore) {
         my $new := self.CREATE();
         unless $shared {
             $shared := nqp::create(ParseShared);
             nqp::bindattr($shared, ParseShared, '$!CUR_CLASS', $?CLASS);
             nqp::bindattr($shared, ParseShared, '$!orig', nqp::decont($orig));
-            nqp::bindattr_s($shared, ParseShared, '$!target',
-#?if parrot
-                pir::trans_encoding__Ssi($orig, pir::find_encoding__Is('ucs4')));
-#?endif
-#?if !parrot
-                $orig);
-#?endif
+            nqp::bindattr_s($shared, ParseShared, '$!target', $orig);
             nqp::bindattr_i($shared, ParseShared, '$!highwater', 0);
             nqp::bindattr($shared, ParseShared, '@!highexpect', nqp::list_s());
             nqp::bindattr($shared, ParseShared, '%!marks', nqp::hash());
@@ -586,6 +580,7 @@ role NQPCursorRole is export {
     }
 
     method before($regex, $off = 0) {
+	my $*SUPPOSING := 1;
         my int $orig_highwater := nqp::getattr_i($!shared, ParseShared, '$!highwater');
         my $orig_highexpect := nqp::getattr($!shared, ParseShared, '@!highexpect');
         nqp::bindattr($!shared, ParseShared, '@!highexpect', nqp::list_s());
@@ -602,6 +597,7 @@ role NQPCursorRole is export {
     # Expects to get a regex whose syntax tree was flipped during the
     # compile.
     method after($regex) {
+	my $*SUPPOSING := 1;
         my int $orig_highwater := nqp::getattr_i($!shared, ParseShared, '$!highwater');
         my $orig_highexpect := nqp::getattr($!shared, ParseShared, '@!highexpect');
         nqp::bindattr($!shared, ParseShared, '@!highexpect', nqp::list_s());
@@ -814,16 +810,9 @@ class NQPMatch is NQPCapture {
     method to()   { $!to }
     method CURSOR() { $!cursor }
     method PRECURSOR() { $!cursor."!cursor_init"($!orig,:p($!from)) }
-#?if parrot
-    method Str() is parrot_vtable('get_string')  { nqp::substr($!orig, $!from, $!to-$!from) }
-    method Int() is parrot_vtable('get_integer') { +self.Str() }
-    method Num() is parrot_vtable('get_number')  { +self.Str() }
-#?endif
-#?if !parrot
     method Str() { nqp::substr($!orig, $!from, $!to-$!from) }
     method Int() { +self.Str() }
     method Num() { +self.Str() }
-#?endif
     method Bool() { $!to >= $!from }
     method chars() { $!to >= $!from ?? $!to - $!from !! 0 }
 

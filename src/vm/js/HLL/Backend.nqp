@@ -22,12 +22,53 @@ class HLLBackend::JavaScript {
     method nqpevent($spec?) {
         # Doesn't do anything just yet
     }
+
+
+    method fresh_profile_filename() {
+        my $filename := 'profile-' ~ nqp::time_n() ~ '.cpuprofile';
+        nqp::sayfh(nqp::getstderr(), "Writing profiling data to $filename");
+        $filename;
+    }
     
-    method run_profiled($what) {
-        nqp::printfh(nqp::getstderr(),
-            "Attach a profiler (e.g. JVisualVM) and press enter");
-        nqp::readlinefh(nqp::getstdin());
-        $what();
+    method run_profiled($what, $kind, $filename?) {
+
+        my $comp := nqp::getcomp('JavaScript');
+
+        my $v8-profiler := $comp.eval('
+            var v8profiler;
+            try {
+              v8profiler = require(\'v8-profiler\');
+            } catch (e) {
+              if (e.message == "Cannot find module \'v8-profiler\'") {
+                null;
+              } else {
+                throw e;
+              }
+            }
+            v8profiler;
+        ');
+
+        if nqp::isnull($v8-profiler) {
+            say("Cannot find module 'v8-profiler'. Install it from npm to enable profiling.");
+            nqp::exit(1);
+        }
+
+        my &start := $comp.eval('(function(profiler, name) {profiler.startProfiling(name)})');
+        my &write := $comp.eval('(function(profiler, name, filename) {
+            var profile = profiler.stopProfiling(name);
+            var fs = require("fs");
+            fs.writeFileSync(filename, JSON.stringify(profile));
+            profile.delete();
+        })');
+
+
+        start($v8-profiler, '');
+
+        my $result := $what();
+
+        write($v8-profiler, '', $filename || self.fresh_profile_filename);
+
+        $result;
     }
     
     method run_traced($level, $what) {
@@ -39,27 +80,37 @@ class HLLBackend::JavaScript {
     }
     
     method stages() {
-        'js node'
+        'js run'
     }
     
     method is_precomp_stage($stage) {
         # Currently, everything is pre-comp since we're a cross-compiler.
-        1
+        $stage eq 'js' || (($stage eq '' || $stage eq 'run') && self.spawn_new_node);
     }
     
     method is_textual_stage($stage) {
         $stage eq 'js';
     }
+
+    method spawn_new_node() {
+        my $comp := nqp::getcomp('JavaScript');
+        nqp::isnull($comp);
+    }
     
     
     method js($qast, *%adverbs) {
-        my $backend := QAST::CompilerJS.new(nyi=>%adverbs<nyi> // 'ignore');
+        my $backend := QAST::CompilerJS.new(nyi=>%adverbs<nyi> // 'ignore', cps=>%adverbs<cps> // 'off');
 
+        my $substagestats := nqp::defined(%adverbs<substagestats>);
 
-        if %adverbs<source-map> {
-            $backend.emit_with_source_map($qast);
+        my $instant := %adverbs<target> eq 'js' || self.spawn_new_node();
+
+        if %adverbs<source-map-debug> {
+            $backend.emit_with_source_map_debug($qast, :$instant);
+        } elsif %adverbs<source-map> {
+            $backend.emit_with_source_map($qast, :$instant);
         } else {
-            my $code := $backend.emit($qast);
+            my $code := $backend.emit($qast, :$instant, :$substagestats);
             $code := self.beautify($code) if %adverbs<beautify>;
             $code;
         }
@@ -74,7 +125,7 @@ class HLLBackend::JavaScript {
         nqp::closefh($fh);
 
         my $pipe   := nqp::syncpipe();
-        my $status := nqp::shell("uglifyjs $tmp_file -b", nqp::cwd(), nqp::getenvhash(),
+        my $status := nqp::shell("js-beautify $tmp_file", nqp::cwd(), nqp::getenvhash(),
             nqp::null(), $pipe, nqp::null(),
             nqp::const::PIPE_INHERIT_IN + nqp::const::PIPE_CAPTURE_OUT + nqp::const::PIPE_INHERIT_ERR);
         my $beautified := nqp::readallfh($pipe);
@@ -91,16 +142,18 @@ class HLLBackend::JavaScript {
         'tmp-' ~ nqp::getpid() ~ '.js';
     }
     
-    method node($js, *%adverbs) {
+    method run($js, *%adverbs) {
         # TODO source map support
+
+        if !self.spawn_new_node {
+            return nqp::getcomp('JavaScript').eval($js);
+        }
+        
         my $tmp_file := self.tmp_file;
 
         my $code := nqp::open($tmp_file, 'w');
         nqp::printfh($code, $js);
         nqp::closefh($code);
-
-
-        
 
         sub (*@args) {
             my @cmd := ["node",$tmp_file];
@@ -131,12 +184,18 @@ class HLLBackend::JavaScript {
         spew($module ~ '/package.json', $package_json);
     }
 
-    method compunit_mainline($output) {
-        $output;
+    # When running on Moar a compunit is just a sub 
+
+    method compunit_mainline($cu) {
+        nqp::isinvokable($cu) ?? $cu !! nqp::compunitmainline($cu);
     }
-    
+
+    method compunit_coderefs($cu) {
+        nqp::compunitcodes($cu);
+    }
+
     method is_compunit($cuish) {
-        1;
+        nqp::isinvokable($cuish) || nqp::iscompunit($cuish);
     }
 }
 

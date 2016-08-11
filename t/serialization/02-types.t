@@ -2,7 +2,7 @@
 
 use nqpmo;
 
-plan(31);
+plan(49);
 
 sub add_to_sc($sc, $idx, $obj) {
     nqp::scsetobj($sc, $idx, $obj);
@@ -14,7 +14,7 @@ sub add_to_sc($sc, $idx, $obj) {
 {
     my $sc := nqp::createsc('TEST_SC_1_IN');
     my $sh := nqp::list_s();
-    
+
     my $type := nqp::knowhow().new_type(:name('Badger'), :repr('P6int'));
     $type.HOW.compose($type);
     add_to_sc($sc, 0, $type);
@@ -149,4 +149,319 @@ sub add_to_sc($sc, $idx, $obj) {
     ok(nqp::scgetobj($dsc, 0).smell eq 'awful',       'method call on deserialized type object ok');
     ok(nqp::scgetobj($dsc, 1).smell eq 'awful',       'method call on deserialized instance object ok');
     ok(nqp::scgetobj($dsc, 1).intro eq "Hi, I'm Bob", 'method call accessing instance attributes ok');
+}
+
+# Serializing a type with boolification (P6opaque REPR, NQPClassHOW)
+{
+    my $sc := nqp::createsc('TEST_SC_5_IN');
+    my $sh := nqp::list_s();
+    
+
+    my $half-true := method () {
+        nqp::bindattr(self, self.WHAT, '$!bool', !nqp::getattr(self, self.WHAT, '$!bool'));
+        nqp::getattr(self, self.WHAT, '$!bool')
+    };
+
+    nqp::scsetcode($sc, 0, $half-true);
+    nqp::markcodestatic($half-true);
+
+    my $type := NQPClassHOW.new_type(:name('Llama'), :repr('P6opaque'));
+    $type.HOW.add_attribute($type, NQPAttribute.new(name => '$!bool'));
+    $type.HOW.add_method($type, 'half-true', $half-true);
+    $type.HOW.add_parent($type, NQPMu);
+    $type.HOW.compose($type);
+    nqp::setboolspec($type, 0, $half-true);
+
+    my $instance := nqp::create($type);
+    nqp::bindattr($instance, $type, '$!bool', 1);
+    add_to_sc($sc, 0, $instance);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+
+    my $dsc := nqp::createsc('TEST_SC_5_OUT');
+    my $cr := nqp::list($half-true);
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    ok(nqp::scobjcount($dsc) >= 2, 'deserialized SC has at least the knowhow type and its instance');
+
+    my $obj := nqp::scgetobj($dsc, 0);
+
+    ok(nqp::istrue($obj) == 0, "checking our custom boolifier is called... 1/3");
+    ok(nqp::istrue($obj) == 1, "checking our custom boolifier is called... 2/3");
+    ok(nqp::istrue($obj) == 0, "checking our custom boolifier is called... 3/3");
+
+}
+
+# Serializing a type with a invocation spec (P6opaque REPR, NQPClassHOW)
+{
+    my $sc := nqp::createsc('TEST_SC_6_IN');
+    my $sh := nqp::list_s();
+    
+
+    my $invoke := sub ($invoke) {
+        700
+    };
+
+    nqp::scsetcode($sc, 0, $invoke);
+    nqp::markcodestatic($invoke);
+
+    my $code := sub () {
+        800
+    };
+
+    nqp::scsetcode($sc, 1, $code);
+    nqp::markcodestatic($code);
+
+    my $type := NQPClassHOW.new_type(:name('type1'), :repr('P6opaque'));
+    $type.HOW.add_parent($type, NQPMu);
+    $type.HOW.compose($type);
+
+    nqp::setinvokespec($type, nqp::null(), nqp::null_s(), $invoke);
+
+    my $type2 := NQPClassHOW.new_type(:name('type2'), :repr('P6opaque'));
+    $type2.HOW.add_parent($type2, NQPMu);
+    $type2.HOW.add_attribute($type, NQPAttribute.new(name => '$!code'));
+    $type2.HOW.compose($type2);
+
+    nqp::setinvokespec($type2, $type2, '$!code', nqp::null());
+
+    my $instance := nqp::create($type);
+    add_to_sc($sc, 0, $instance);
+
+    my $instance2 := nqp::create($type2);
+    nqp::bindattr($instance2, $type2, '$!code', $code);
+    add_to_sc($sc, 1, $instance2);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_6_OUT');
+    my $cr := nqp::list($invoke, $code);
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    my $obj := nqp::scgetobj($dsc, 0);
+
+    ok($obj() == 700, "invokespec with invokeHandler survived serialization");
+
+    my $obj2 := nqp::scgetobj($dsc, 1);
+
+    ok($obj2() == 800, "invokespec with attribute survived serialization");
+}
+
+# Serializing a type with box_target attribute
+{
+    my $sc := nqp::createsc('TEST_SC_7_IN');
+    my $sh := nqp::list_s();
+
+    my $type := NQPClassHOW.new_type(:name('boxing_test'), :repr('P6opaque'));
+    $type.HOW.add_attribute($type, NQPAttribute.new(
+        :name('$!value'), :type(int), :box_target(1)
+    ));
+    $type.HOW.add_parent($type, NQPMu);
+    $type.HOW.compose($type);
+    add_to_sc($sc, 0, $type);
+
+    my $instance := nqp::box_i(4, $type);
+    add_to_sc($sc, 1, $instance);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_7_OUT');
+    my $cr := nqp::list();
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    ok(nqp::unbox_i(nqp::box_i(7, nqp::scgetobj($dsc, 0))) == 7, "can use deserialized type for boxing");
+    ok(nqp::unbox_i(nqp::scgetobj($dsc, 1)) == 4, "can unbox deserialized object - int");
+}
+
+# Serializing a P6bigint repr
+{
+    my $sc := nqp::createsc('TEST_SC_8_IN');
+    my $sh := nqp::list_s();
+
+    my $knowhow := nqp::knowhow();
+    my $type := $knowhow.new_type(:name('TestBigInt'), :repr('P6bigint'));
+    $type.HOW.compose($type);
+    add_to_sc($sc, 0, $type);
+
+    my $instance := nqp::box_i(147, $type);
+    add_to_sc($sc, 1, $instance);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_8_OUT');
+    my $cr := nqp::list();
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    ok(nqp::unbox_i(nqp::scgetobj($dsc, 1)) == 147, "can unbox serialized bigint");
+}
+
+# Serializing a type with box_target attribute and P6bigint type
+{
+    my $bi_type := NQPClassHOW.new_type(:name('TestBigInt'), :repr('P6bigint'));
+    $bi_type.HOW.add_parent($bi_type, NQPMu);
+    $bi_type.HOW.compose($bi_type);
+
+    my $sc := nqp::createsc('TEST_SC_9_IN');
+    my $sh := nqp::list_s();
+
+    my $type := NQPClassHOW.new_type(:name('boxing_test'), :repr('P6opaque'));
+    $type.HOW.add_attribute($type, NQPAttribute.new(
+        :name('$!value'), :type($bi_type), :box_target(1)
+    ));
+    $type.HOW.add_parent($type, NQPMu);
+    $type.HOW.compose($type);
+
+    add_to_sc($sc, 0, $bi_type);
+
+    my $instance := nqp::box_i(4, $bi_type);
+    add_to_sc($sc, 1, $instance);
+
+    my $instance2 := nqp::box_i(5, $bi_type);
+    add_to_sc($sc, 2, $instance2);
+
+    add_to_sc($sc, 3, $type);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_9_OUT');
+    my $cr := nqp::list();
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    ok(nqp::unbox_i(nqp::box_i(7, nqp::scgetobj($dsc, 0))) == 7, "can use deserialized type for boxing - got " ~ nqp::scgetobj($dsc,0));
+    ok(nqp::unbox_i(nqp::box_i(8, nqp::scgetobj($dsc, 3))) == 8, "can use deserialized type for boxing");
+    ok(nqp::unbox_i(nqp::scgetobj($dsc, 1)) == 4, "can unbox bigint obj");
+    ok(nqp::unbox_i(nqp::scgetobj($dsc, 2)) == 5, "can unbox autoboxed bigint obj");
+}
+
+# Serializing a parameterized type
+{
+    my $sc := nqp::createsc('TEST_SC_10_IN');
+    my $sh := nqp::list_s();
+
+    my $cr := nqp::list();
+
+    my $count := 0;
+
+    class SimpleCoerceHOW {
+        method new_type() {
+            my $type := nqp::newtype(self.new(), 'Uninstantiable');
+
+            my $parameterizer := -> $type, $params {
+                # Re-use same HOW.
+                $count := $count + 1;
+                nqp::newtype($type.HOW, 'Uninstantiable');
+            }
+
+            $cr[0] := $parameterizer;
+            nqp::scsetcode($sc, 0, $parameterizer);
+            nqp::markcodestatic($parameterizer);
+
+            nqp::setparameterizer($type, $parameterizer);
+            $type
+        }
+
+        method parameterize($type, $params) {
+            nqp::parameterizetype($type, $params);
+        }
+    }
+
+    my $with_param := SimpleCoerceHOW.new_type();
+
+
+    my $hi := $with_param.HOW.parameterize($with_param, ["Hi"]);
+
+    add_to_sc($sc, 0, $with_param);
+
+    add_to_sc($sc, 1, $hi);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_10_OUT');
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    my $type := nqp::scgetobj($dsc, 0);
+
+    my $hello := $type.HOW.parameterize($type, ["Hello"]);
+    ok(nqp::typeparameterat($hello, 0) eq "Hello", "We can serialize a parameteric type");
+
+    my $dsc_hi := nqp::scgetobj($dsc, 1);
+
+    ok(nqp::typeparameterat($dsc_hi, 0) eq "Hi", "We can serialize a parameterized type");
+}
+
+# Serializing a type with HLL owner
+{
+
+    my $type := NQPClassHOW.new_type(:name('hll test'), :repr('P6opaque'));
+    $type.HOW.add_parent($type, NQPMu);
+    $type.HOW.compose($type);
+
+    nqp::settypehll($type, "foo");
+
+    class Baz {
+    }
+
+    nqp::sethllconfig('foo', nqp::hash(
+        'foreign_transform_array', -> $array {
+            'fooifed';
+         }
+    ));
+    nqp::sethllconfig('baz', nqp::hash(
+        'foreign_transform_array', -> $array {
+            Baz;
+        },
+    ));
+
+    my $sc := nqp::createsc('TEST_SC_11_IN');
+    my $sh := nqp::list_s();
+
+    my $cr := nqp::list();
+
+    add_to_sc($sc, 0, $type);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_11_OUT');
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    my $obj := nqp::scgetobj($dsc, 0).new;
+
+    nqp::settypehllrole(nqp::scgetobj($dsc, 0), 4);
+
+    ok(nqp::eqaddr(nqp::hllizefor($obj, "foo"), $obj), "correct hll prevents convertion");
+    ok(nqp::eqaddr(nqp::hllizefor($obj, "baz"), Baz), "in this case it's converted anyway");
+}
+
+# Serializing a type with HLL role
+{
+
+    my $type := NQPClassHOW.new_type(:name('hll test'), :repr('P6opaque'));
+    $type.HOW.add_parent($type, NQPMu);
+    $type.HOW.compose($type);
+
+    nqp::settypehllrole($type, 4);
+
+    nqp::sethllconfig('somelang', nqp::hash(
+        'foreign_transform_array', -> $array {
+            'fooifed';
+         }
+    ));
+    my $sc := nqp::createsc('TEST_SC_12_IN');
+    my $sh := nqp::list_s();
+
+    my $cr := nqp::list();
+
+    add_to_sc($sc, 0, $type);
+
+    my $serialized := nqp::serialize($sc, $sh);
+
+    my $dsc := nqp::createsc('TEST_SC_12_OUT');
+    nqp::deserialize($serialized, $dsc, $sh, $cr, nqp::null());
+
+    my $obj := nqp::scgetobj($dsc, 0).new;
+
+
+    my $hllized := nqp::hllizefor($obj, "somelang");
+    ok(nqp::isstr($hllized) && $hllized eq "fooifed", "hll role is preserved correctly");
 }

@@ -25,10 +25,10 @@ class HLL::Backend::JavaScriptAndMoar {
 class FreshMonkeyPatchedCompiler {
     has $!instance;
     has $!operations;
-    method to_mast($qast) {
+    method to_mast(*@args) {
         my $new := $!instance.new;
         $new.HOW.mixin($new, SerializeOnce);
-        $new.to_mast($qast)
+        $new.to_mast(|@args)
     }
 
     method operations() {
@@ -67,7 +67,6 @@ sub MAIN(*@ARGS, *%ARGS) {
         :setting-path('gen/js/stage2'),
         :bootstrap(1),
         :custom-regex-lib('QRegex'),
-        :no-regex-lib(1),
         :encoding('utf8'), :transcode('ascii iso-8859-1'));
 
 }

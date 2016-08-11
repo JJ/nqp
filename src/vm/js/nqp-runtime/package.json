@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "the runtime for the js backend for nqp",
   "bugs": {
-    "url:": "https://github.com/pmurias/nqp-js/issues",
+    "url:": "https://github.com/perl6/nqp/issues",
     "email": "pawelmurias@gmail.com"
   },
   "licenses": [
@@ -12,15 +12,17 @@
       "url": "http://opensource.org/licenses/Artistic-2.0"
     }
   ],
-  "repository": "http://github.com/pmurias/nqp-js/",
+  "repository": "http://github.com/perl6/nqp/",
   "main": "runtime.js",
   "dependencies": {
     "bignum": "*",
-    "fs-ext": "pmurias/node-fs-ext#nan_2",
-    "iconv-lite": "*",
+    "fs-ext": "*",
     "node-int64": "*",
     "nqp-js-io": "pmurias/nqp-js-io",
     "sha1": "*",
-    "sleep": "*"
+    "sleep": "*",
+    "xorshift": "*",
+    "ffi": "*",
+    "ref": "*"
   }
 }

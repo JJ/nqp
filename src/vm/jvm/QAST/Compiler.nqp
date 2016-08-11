@@ -81,10 +81,12 @@ my $EX_CAT_PROCEED := 256;
 my $EX_CAT_AWAIT   := 8192;
 my $EX_CAT_EMIT    := 16384;
 my $EX_CAT_DONE    := 32768;
+my $EX_CAT_RETURN  := 65536;
 my $EX_CAT_CONTROL := $EX_CAT_NEXT +| $EX_CAT_REDO +| $EX_CAT_LAST +|
                       $EX_CAT_TAKE +| $EX_CAT_WARN +|
                       $EX_CAT_SUCCEED +| $EX_CAT_PROCEED +|
-                      $EX_CAT_AWAIT +| $EX_CAT_EMIT +| $EX_CAT_DONE;
+                      $EX_CAT_AWAIT +| $EX_CAT_EMIT +| $EX_CAT_DONE +|
+                      $EX_CAT_RETURN;
 my $EX_CAT_LABELED := 4096;
 
 # Exception handler kinds.
@@ -1610,6 +1612,10 @@ QAST::OperationsJAST.map_classlib_core_op('backtracestrings', $TYPE_OPS, 'backtr
 QAST::OperationsJAST.map_classlib_core_op('throw', $TYPE_OPS, '_throw_c', [$RT_OBJ], $RT_OBJ, :tc, :cont);
 QAST::OperationsJAST.map_classlib_core_op('rethrow', $TYPE_OPS, 'rethrow_c', [$RT_OBJ], $RT_OBJ, :tc, :cont);
 QAST::OperationsJAST.map_classlib_core_op('resume', $TYPE_OPS, 'resume', [$RT_OBJ], $RT_OBJ, :tc);
+QAST::OperationsJAST.map_classlib_core_op('throwpayloadlex', $TYPE_OPS, '_throwpayloadlex_c', [$RT_INT, $RT_OBJ], $RT_OBJ, :tc, :cont, :!inlinable);
+QAST::OperationsJAST.map_classlib_core_op('throwpayloadlexcaller', $TYPE_OPS, '_throwpayloadlexcaller_c', [$RT_INT, $RT_OBJ], $RT_OBJ, :tc, :cont, :!inlinable);
+QAST::OperationsJAST.map_classlib_core_op('lastexpayload', $TYPE_OPS, 'lastexpayload', [], $RT_OBJ, :tc, :!inlinable);
+QAST::OperationsJAST.map_classlib_core_op('throwextype', $TYPE_OPS, 'throwcatdyn_c', [$RT_INT], $RT_OBJ, :tc, :cont);
 my %handler_names := nqp::hash(
     'CATCH',   $EX_CAT_CATCH,
     'CONTROL', $EX_CAT_CONTROL,
@@ -1623,6 +1629,7 @@ my %handler_names := nqp::hash(
     'AWAIT',   $EX_CAT_AWAIT,
     'EMIT',    $EX_CAT_EMIT,
     'DONE',    $EX_CAT_DONE,
+    'RETURN',  $EX_CAT_RETURN,
 );
 QAST::OperationsJAST.add_core_op('handle', :!inlinable, sub ($qastcomp, $op) {
     my @children := nqp::clone($op.list());
@@ -1774,6 +1781,56 @@ QAST::OperationsJAST.add_core_op('handle', :!inlinable, sub ($qastcomp, $op) {
     # Evaluate to the result.
     $il.append(JAST::Instruction.new( :op('aload'), $result ));
     result($il, $RT_OBJ);
+});
+
+# Simple payload handler.
+QAST::OperationsJAST.add_core_op('handlepayload', :!inlinable, sub ($qastcomp, $op) {
+    my @children := $op.list;
+    if @children != 3 {
+        nqp::die("The 'handlepayload' op requires three children");
+    }
+    my str $type := @children[1];
+    unless nqp::existskey(%handler_names, $type) {
+        nqp::die("Invalid handler type '$type'");
+    }
+    my int $mask := %handler_names{$type};
+
+    # Create label and handler.
+    my $hp_id := $qastcomp.unique('payload_handler');
+    my $done_lbl := JAST::Label.new( :name($hp_id ~ '_done') );
+    my $handler_id := &*REGISTER_UNWIND_HANDLER($*HANDLER_IDX, $mask, :ex_obj(1));
+
+    # Spill stack ahead of emitting try/catch.
+    my $il := JAST::InstructionList.new();
+    $*STACK.spill_to_locals($il);
+
+    # Compile code in protected region and stash result.
+    my $result := $*TA.fresh_o();
+    my $prores := $qastcomp.as_jast_in_handler(@children[0], $handler_id, :want($RT_OBJ));
+    my $tryil  := JAST::InstructionList.new();
+    $tryil.append($prores.jast);
+    $*STACK.obtain($tryil, $prores);
+    $tryil.append(JAST::Instruction.new( :op('astore'), $result ));
+    $tryil.append(JAST::Instruction.new( :op('goto'), $done_lbl ));
+
+    # Compile handler.
+    my $catch := JAST::InstructionList.new();
+    $qastcomp.unwind_check($catch, $handler_id, :outer($*HANDLER_IDX));
+    $catch.append($POP);
+    my $hanres := $qastcomp.as_jast(@children[2], :want($RT_OBJ));
+    $catch.append($hanres.jast);
+    $*STACK.obtain($catch, $hanres);
+    $catch.append(JAST::Instruction.new( :op('astore'), $result ));
+
+    # Wrap in try/catch.
+    $il.append($qastcomp.delimit_handler(
+        JAST::TryCatch.new( :try($tryil), :catch($catch), :type($TYPE_EX_UNWIND) ),
+        $*HANDLER_IDX, $handler_id));
+    $il.append($done_lbl);
+
+    # Load result.
+    $il.append(JAST::Instruction.new( :op('aload'), $result ));
+    result($il, $RT_OBJ)
 });
 
 # Control exception throwing.
@@ -1939,6 +1996,7 @@ QAST::OperationsJAST.map_classlib_core_op('captureposarg_s', $TYPE_OPS, 'capture
 QAST::OperationsJAST.map_classlib_core_op('captureposprimspec', $TYPE_OPS, 'captureposprimspec', [$RT_OBJ, $RT_INT], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('captureexistsnamed', $TYPE_OPS, 'captureexistsnamed', [$RT_OBJ, $RT_STR], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('capturehasnameds', $TYPE_OPS, 'capturehasnameds', [$RT_OBJ], $RT_INT, :tc);
+QAST::OperationsJAST.map_classlib_core_op('capturenamedshash', $TYPE_OPS, 'capturenamedshash', [$RT_OBJ], $RT_OBJ, :tc);
 
 # Multiple dispatch related.
 QAST::OperationsJAST.map_classlib_core_op('invokewithcapture', $TYPE_OPS, 'invokewithcapture', [$RT_OBJ, $RT_OBJ], $RT_OBJ, :tc);
@@ -1981,6 +2039,7 @@ my %const_map := nqp::hash(
     'CONTROL_AWAIT',        8192,
     'CONTROL_EMIT',         16384,
     'CONTROL_DONE',         32768,
+    'CONTROL_RETURN',       65536,
     
     'STAT_EXISTS',             0,
     'STAT_FILESIZE',           1,
@@ -2012,6 +2071,11 @@ my %const_map := nqp::hash(
     'PIPE_INHERIT_ERR',         64,
     'PIPE_IGNORE_ERR',          128,
     'PIPE_CAPTURE_ERR',         256,
+    'PIPE_MERGED_OUT_ERR',      512,
+
+    # could probably support a few more...
+    'SIG_INT',                  2,
+    'SIG_KILL',                 9,
 
     'TYPE_CHECK_CACHE_DEFINITIVE',  0,
     'TYPE_CHECK_CACHE_THEN_METHOD', 1,
@@ -2022,6 +2086,8 @@ my %const_map := nqp::hash(
     'C_TYPE_INT',               -3,
     'C_TYPE_LONG',              -4,
     'C_TYPE_LONGLONG',          -5,
+    'C_TYPE_SIZE_T',            -6,
+    'C_TYPE_BOOL',              -7,
     'C_TYPE_FLOAT',             -1,
     'C_TYPE_DOUBLE',            -2,
     'C_TYPE_LONGDOUBLE',        -3,
@@ -2051,6 +2117,9 @@ QAST::OperationsJAST.map_classlib_core_op('associative_bind', $TYPE_OPS, 'bindke
 QAST::OperationsJAST.map_classlib_core_op('print', $TYPE_OPS, 'print', [$RT_STR], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('say', $TYPE_OPS, 'say', [$RT_STR], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('stat', $TYPE_OPS, 'stat', [$RT_STR, $RT_INT], $RT_INT);
+QAST::OperationsJAST.map_classlib_core_op('lstat', $TYPE_OPS, 'lstat', [$RT_STR, $RT_INT], $RT_INT);
+QAST::OperationsJAST.map_classlib_core_op('stat_time', $TYPE_OPS, 'stat_time', [$RT_STR, $RT_INT], $RT_NUM);
+QAST::OperationsJAST.map_classlib_core_op('lstat_time', $TYPE_OPS, 'lstat_time', [$RT_STR, $RT_INT], $RT_NUM);
 QAST::OperationsJAST.map_classlib_core_op('open', $TYPE_OPS, 'open', [$RT_STR, $RT_STR], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('readlink', $TYPE_OPS, 'readlink', [$RT_STR], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('filereadable', $TYPE_OPS, 'filereadable', [$RT_STR], $RT_INT, :tc);
@@ -2071,6 +2140,7 @@ QAST::OperationsJAST.map_classlib_core_op('writefh', $TYPE_OPS, 'writefh', [$RT_
 QAST::OperationsJAST.map_classlib_core_op('printfh', $TYPE_OPS, 'printfh', [$RT_OBJ, $RT_STR], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('sayfh', $TYPE_OPS, 'sayfh', [$RT_OBJ, $RT_STR], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('flushfh', $TYPE_OPS, 'flushfh', [$RT_OBJ], $RT_OBJ, :tc);
+QAST::OperationsJAST.map_classlib_core_op('readcharsfh', $TYPE_OPS, 'readcharsfh', [$RT_OBJ, $RT_INT], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('readlinefh', $TYPE_OPS, 'readlinefh', [$RT_OBJ], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('readlinechompfh', $TYPE_OPS, 'readlinechompfh', [$RT_OBJ], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('readallfh', $TYPE_OPS, 'readallfh', [$RT_OBJ], $RT_STR, :tc);
@@ -2080,6 +2150,7 @@ QAST::OperationsJAST.map_classlib_core_op('closefh', $TYPE_OPS, 'closefh', [$RT_
 QAST::OperationsJAST.map_classlib_core_op('closefh_i', $TYPE_OPS, 'closefhi', [$RT_OBJ], $RT_INT, :tc);
 
 QAST::OperationsJAST.map_classlib_core_op('isttyfh', $TYPE_OPS, 'isttyfh', [$RT_OBJ], $RT_INT, :tc);
+QAST::OperationsJAST.map_classlib_core_op('filenofh', $TYPE_OPS, 'filenofh', [$RT_OBJ], $RT_INT, :tc);
 
 QAST::OperationsJAST.map_classlib_core_op('chmod', $TYPE_OPS, 'chmod', [$RT_STR, $RT_INT], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('unlink', $TYPE_OPS, 'unlink', [$RT_STR], $RT_INT, :tc);
@@ -2195,7 +2266,7 @@ QAST::OperationsJAST.map_classlib_core_op('uc', $TYPE_OPS, 'uc', [$RT_STR], $RT_
 QAST::OperationsJAST.map_classlib_core_op('lc', $TYPE_OPS, 'lc', [$RT_STR], $RT_STR);
 QAST::OperationsJAST.map_classlib_core_op('tc', $TYPE_OPS, 'uc', [$RT_STR], $RT_STR);
 QAST::OperationsJAST.map_classlib_core_op('fc', $TYPE_OPS, 'lc', [$RT_STR], $RT_STR);
-QAST::OperationsJAST.map_classlib_core_op('x', $TYPE_OPS, 'x', [$RT_STR, $RT_INT], $RT_STR);
+QAST::OperationsJAST.map_classlib_core_op('x', $TYPE_OPS, 'x', [$RT_STR, $RT_INT], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('iscclass', $TYPE_OPS, 'iscclass', [$RT_INT, $RT_STR, $RT_INT], $RT_INT);
 QAST::OperationsJAST.map_classlib_core_op('concat', $TYPE_OPS, 'concat', [$RT_STR, $RT_STR], $RT_STR);
 QAST::OperationsJAST.map_classlib_core_op('chr', $TYPE_OPS, 'chr', [$RT_INT], $RT_STR, :tc);
@@ -2507,7 +2578,7 @@ QAST::OperationsJAST.map_classlib_core_op('box_i', $TYPE_OPS, 'box_i', [$RT_INT,
 QAST::OperationsJAST.map_classlib_core_op('box_n', $TYPE_OPS, 'box_n', [$RT_NUM, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('box_s', $TYPE_OPS, 'box_s', [$RT_STR, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('can', $TYPE_OPS, 'can', [$RT_OBJ, $RT_STR], $RT_INT, :tc);
-QAST::OperationsJAST.map_classlib_core_op('reprname', $TYPE_OPS, 'reprname', [$RT_OBJ], $RT_STR);
+QAST::OperationsJAST.map_classlib_core_op('reprname', $TYPE_OPS, 'reprname', [$RT_OBJ], $RT_STR, :tc);
 QAST::OperationsJAST.map_classlib_core_op('newtype', $TYPE_OPS, 'newtype', [$RT_OBJ, $RT_STR], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('composetype', $TYPE_OPS, 'composetype', [$RT_OBJ, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('setboolspec', $TYPE_OPS, 'setboolspec', [$RT_OBJ, $RT_INT, $RT_OBJ], $RT_OBJ, :tc);
@@ -2527,6 +2598,8 @@ QAST::OperationsJAST.map_classlib_core_op('parameterizetype', $TYPE_OPS, 'parame
 QAST::OperationsJAST.map_classlib_core_op('typeparameterized', $TYPE_OPS, 'typeparameterized', [$RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('typeparameters', $TYPE_OPS, 'typeparameters', [$RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('typeparameterat', $TYPE_OPS, 'typeparameterat', [$RT_OBJ, $RT_INT], $RT_OBJ, :tc);
+
+QAST::OperationsJAST.map_classlib_core_op('setdebugtypename', $TYPE_OPS, 'setdebugtypename', [$RT_OBJ, $RT_STR], $RT_OBJ, :tc);
 })();
 
 # defined - overridden by HLL, but by default same as .DEFINITE.
@@ -2673,6 +2746,7 @@ QAST::OperationsJAST.map_classlib_core_op('gethllsym', $TYPE_OPS, 'gethllsym', [
 QAST::OperationsJAST.map_classlib_core_op('bindhllsym', $TYPE_OPS, 'bindhllsym', [$RT_STR, $RT_STR, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('sethllconfig', $TYPE_OPS, 'sethllconfig', [$RT_STR, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('loadbytecode', $TYPE_OPS, 'loadbytecode', [$RT_STR], $RT_STR, :tc);
+QAST::OperationsJAST.map_classlib_core_op('loadbytecodebuffer', $TYPE_OPS, 'loadbytecodebuffer', [$RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('usecompilerhllconfig', $TYPE_OPS, 'usecompilerhllconfig', [], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('usecompileehllconfig', $TYPE_OPS, 'usecompileehllconfig', [], $RT_INT, :tc);
 QAST::OperationsJAST.map_classlib_core_op('settypehll', $TYPE_OPS, 'settypehll', [$RT_OBJ, $RT_STR], $RT_OBJ, :tc);
@@ -2714,7 +2788,8 @@ QAST::OperationsJAST.map_classlib_core_op('queuepoll', $TYPE_OPS, 'queuepoll', [
 # asynchrony related ops
 QAST::OperationsJAST.map_classlib_core_op('timer', $TYPE_OPS, 'timer', [$RT_OBJ, $RT_OBJ, $RT_INT, $RT_INT, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('cancel', $TYPE_OPS, 'cancel', [$RT_OBJ], $RT_OBJ, :tc);
-QAST::OperationsJAST.map_classlib_core_op('signal', $TYPE_IO_OPS, 'signal', [$RT_OBJ, $RT_OBJ, $RT_INT, $RT_INT, $RT_OBJ], $RT_OBJ, :tc);
+QAST::OperationsJAST.map_classlib_core_op('cancelnotify', $TYPE_OPS, 'cancelnotify', [$RT_OBJ, $RT_OBJ, $RT_OBJ], $RT_OBJ, :tc);
+QAST::OperationsJAST.map_classlib_core_op('signal', $TYPE_IO_OPS, 'signal', [$RT_OBJ, $RT_OBJ, $RT_INT, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('watchfile', $TYPE_IO_OPS, 'watchfile', [$RT_OBJ, $RT_OBJ, $RT_STR, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('asyncconnect', $TYPE_IO_OPS, 'asyncconnect', [$RT_OBJ, $RT_OBJ, $RT_STR, $RT_INT, $RT_OBJ], $RT_OBJ, :tc);
 QAST::OperationsJAST.map_classlib_core_op('asynclisten', $TYPE_IO_OPS, 'asynclisten', [$RT_OBJ, $RT_OBJ, $RT_STR, $RT_INT, $RT_INT, $RT_OBJ], $RT_OBJ, :tc);

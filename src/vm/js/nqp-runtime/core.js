@@ -7,34 +7,23 @@ var CodeRef = require('./code-ref.js');
 var LexPadHack = require('./lexpad-hack.js');
 var NQPInt = require('./nqp-int.js');
 
+var NQPException = require('./nqp-exception.js');
+
 var reprs = require('./reprs.js');
 
+var hll = require('./hll.js');
+
+var NQPArray = require('./array.js');
+
+var bootstrap = require('./bootstrap.js');
+
+var nqp = require('nqp-runtime');
+
+var constants = require('./constants.js');
+
+var containerSpecs = require('./container-specs.js');
+
 exports.CodeRef = CodeRef;
-
-op.atpos = function(array, index) {
-  if (array instanceof Array) {
-    if (index < 0) {
-      index = array.length + index;
-    }
-    return array[index];
-  } else {
-    return array.$$atpos(index);
-  }
-};
-
-op.bindpos = function(array, index, value) {
-  if (array instanceof Array) {
-    if (index < 0) {
-      index = array.length + index;
-    }
-    return (array[index] = value);
-  } else {
-    return array.$$bindpos(index, value);
-  }
-};
-
-op.getcomp = function(lang) {
-};
 
 op.isinvokable = function(obj) {
   return (obj instanceof CodeRef || (obj._STable && obj._STable.invocationSpec) ? 1 : 0);
@@ -52,36 +41,43 @@ op.escape = function(str) {
       .replace(/"/g, '\\"');
 };
 
-op.x = function(str, times) {
-  if (!times) return '';
-  var ret = str;
-  while (--times) ret += str;
-  return ret;
-};
-
-op.radix = function(radix, str, zpos, flags) {
-  if (flags != 2) {throw 'flags != 2 not implemented yet: ' + flags}
-
+function radixHelper(radix, str, zpos, flags) {
   var lowercase = 'a-' + String.fromCharCode('a'.charCodeAt(0) + radix - 11);
   var uppercase = 'A-' + String.fromCharCode('A'.charCodeAt(0) + radix - 11);
 
   var letters = radix >= 11 ? lowercase + uppercase : '';
 
   var digitclass = '[0-' + Math.min(radix - 1, 9) + letters + ']';
-  var minus = flags & 0x02 ? '-?' : '';
+  var minus = flags & 0x02 ? '(?:-?|\\+?)' : '';
   var regex = new RegExp(
       '^' + minus + digitclass + '(?:_' +
       digitclass + '|' + digitclass + ')*');
   var str = str.slice(zpos);
   var search = str.match(regex);
   if (search == null) {
-    return [0, 1, -1];
+    return null;
   }
-  var number = search[0].replace(/_/g, '');
+  var number = search[0].replace(/_/g, '').replace(/^\+/, '');
+  if (flags & 0x01) number = '-' + number;
+  if (flags & 0x04) number = number.replace(/0+$/, '');
   var power = number[0] == '-' ? number.length - 1 : number.length;
-  var pow = Math.pow(radix, power);
-  var ret = [parseInt(number, radix), pow, zpos + search[0].length];
-  return ret;
+  return {power: power, offset: zpos + search[0].length, number: number};
+}
+
+exports.radixHelper = radixHelper;
+
+op.radix = function(radix, str, zpos, flags) {
+  var extracted = radixHelper(radix, str, zpos, flags);
+  if (extracted == null) {
+    return new NQPArray([0, 1, -1]);
+  }
+  var pow = Math.pow(radix, extracted.power);
+  return new NQPArray([parseInt(extracted.number, radix), pow, extracted.offset]);
+};
+
+op.setdebugtypename = function(type, debugName) {
+  type._STable.debugName = debugName;
+  return type;
 };
 
 function Iter(array) {
@@ -90,56 +86,56 @@ function Iter(array) {
   this.idx = 0;
 }
 
-Iter.prototype.shift = function() {
+Iter.prototype.$$shift = function() {
   return this.array[this.idx++];
 };
 
-Iter.prototype.$$to_bool = function(ctx) {
+Iter.prototype.$$toBool = function(ctx) {
   return this.idx < this.target;
 };
 
 function HashIter(hash) {
-  this.hash = hash;
-  this.keys = Object.keys(hash.content);
+  this.hash = hash.content;
+  this.keys = Object.keys(hash.$$toObject());
   this.target = this.keys.length;
   this.idx = 0;
 }
 
-HashIter.prototype.shift = function() {
+HashIter.prototype.$$shift = function() {
   return new IterPair(this.hash, this.keys[this.idx++]);
 };
 
-HashIter.prototype.$$to_bool = function(ctx) {
+HashIter.prototype.$$toBool = function(ctx) {
   return this.idx < this.target;
 };
 
 function IterPair(hash, key) {
   this._key = key;
-  this._hash = hash.content;
+  this._hash = hash;
 }
 
 IterPair.prototype.iterval = function() {
-  return this._hash[this._key];
+  return this._hash.get(this._key);
 };
 IterPair.prototype.iterkey_s = function() {
   return this._key;
 };
 
-IterPair.prototype.Str = function(ctx) {
+IterPair.prototype.Str = function(ctx, _NAMED, self) {
   return this._key;
 };
 
-IterPair.prototype.key = function(ctx, named) {
+IterPair.prototype.key = function(ctx, _NAMED, self) {
   return this._key;
 };
-IterPair.prototype.value = function(ctx, named) {
-  return this._hash[this._key];
+IterPair.prototype.value = function(ctx, _NAMED, self) {
+  return this._hash.get(this._key);
 };
 
 
 op.iterator = function(obj) {
-  if (obj instanceof Array) {
-    return new Iter(obj);
+  if (obj instanceof NQPArray) {
+    return new Iter(obj.array);
   } else if (obj instanceof Hash) {
     return new HashIter(obj);
   } else if (obj instanceof LexPadHack) {
@@ -154,17 +150,19 @@ exports.hash = function() {
   return new Hash();
 };
 
-exports.slurpy_named = function(named) {
+exports.slurpyNamed = function(named, skip) {
   var hash = new Hash();
   for (key in named) {
-    hash.content[key] = named[key];
+    if (!skip[key]) {
+      hash.content.set(key, named[key]);
+    }
   }
   return hash;
 };
 
-exports.unwrap_named = function(named) {
+exports.unwrapNamed = function(named) {
   if (!named instanceof Hash) console.log('expecting a hash here');
-  return named.content;
+  return named.$$toObject();
 };
 
 exports.named = function(parts) {
@@ -183,6 +181,7 @@ exports.op.ishash = function(obj) {
 };
 
 op.existspos = function(array, idx) {
+  if (array.$$existspos) return array.$$existspos(idx);
   if (idx < 0) idx += array.length;
   return array.hasOwnProperty(idx) ? 1 : 0;
 };
@@ -195,13 +194,13 @@ op.create = function(obj) {
 
 op.bootarray = function(obj) {
   return {_STable: {REPR: {allocate: function(STable) {
-    return [];
+    return new NQPArray([]);
   }}}};
 };
 
 op.defined = function(obj) {
   // TODO - handle more things that aren't defined
-  if (obj === undefined || obj === null || obj.type_object_) {
+  if (obj === undefined || obj === null || obj.typeObject_) {
     return 0;
   }
   return 1;
@@ -209,9 +208,6 @@ op.defined = function(obj) {
 
 
 op.setinvokespec = function(obj, classHandle, attrName, invocationHandler) {
-  if (invocationHandler !== null) {
-    throw 'invocationHandler argument to setinvokespec not supported';
-  }
   obj._STable.setinvokespec(classHandle, attrName, invocationHandler);
   return obj;
 };
@@ -222,19 +218,41 @@ op.setboolspec = function(obj, mode, method) {
   return obj;
 };
 
-function Capture(named, pos) {
+function Capture(named, pos, skip) {
   this.pos = pos;
   this.named = named;
 }
 
+Capture.prototype.$$clone = function() {
+  return this; // captures are immutable
+};
+
 op.savecapture = function(args) {
   return new Capture(args[1], Array.prototype.slice.call(args, 2));
 };
+
 op.captureposelems = function(capture) {
   return capture.pos.length;
 };
+
 op.captureposarg = function(capture, i) {
   return capture.pos[i];
+};
+
+op.capturehasnameds = function(capture) {
+  return (!capture.named || Object.keys(capture.named).length == 0) ? 0 : 1;
+};
+
+op.captureexistsnamed = function(capture, arg) {
+  return (capture.named && capture.named.hasOwnProperty(arg)) ? 1 : 0;
+};
+
+op.capturenamedshash = function(capture) {
+  var hash = new Hash();
+  for (key in capture.named) {
+    hash.content.set(key, capture.named[key]);
+  }
+  return hash;
 };
 
 op.setcodeobj = function(codeRef, codeObj) {
@@ -245,33 +263,9 @@ op.getcodeobj = function(codeRef) {
   return codeRef.codeObj;
 };
 
-op.curcode = function() {
-  var current = arguments.callee.caller;
-  return current.codeRef;
-};
-
-op.callercode = function() {
-  var current = arguments.callee.caller;
-
-  /* Skip all fake first _ functions so we can skip a real one*/
-  while (current.name == '_') {
-    current = current.caller;
-  }
-
-  /* Skip a real function */
-  current = current.caller;
-
-  /* Skip all fake _ functions to get to a real one*/
-  while (current.name == '_') {
-    current = current.caller;
-  }
-
-  return current.codeRef;
-};
-
-
 // TODO benchmark and pick a fast way of doing this
 op.splice = function(target, source, offset, length) {
+  if (target.$$splice) return target.$$splice(source, offset, length);
   var args = [offset, length];
   for (var i = 0; i < source.length; i++) {
     args.push(source[i]);
@@ -281,10 +275,10 @@ op.splice = function(target, source, offset, length) {
 };
 
 op.findmethod = function(obj, method) {
-  return obj._STable.method_cache[method];
+  return obj._STable.methodCache[method];
 };
 
-op.istype = function(obj, type) {
+op.istype = function(ctx, obj, type) {
   /* Null always type checks false. */
   /* HACK - undefined */
   if (obj === null || obj === undefined) {
@@ -292,22 +286,43 @@ op.istype = function(obj, type) {
   }
 
   // HACK
-  if (typeof obj === 'number' || typeof obj === 'string' || obj instanceof Array || obj instanceof Hash || obj instanceof NQPInt) {
+  if (typeof obj === 'number' || typeof obj === 'string' || obj instanceof Hash || obj instanceof NQPInt) {
     return 0;
   }
 
-  // TODO cases where the type_check_cache isn't authoritative
-  var cache = obj._STable.type_check_cache;
-  for (var i = 0; i < cache.length; i++) {
-    if (cache[i] === type) {
+  // HACK
+  if (obj instanceof NQPArray) {
+    if (hll.hllConfigs.nqp && type == hll.hllConfigs.nqp.get('list')) {
       return 1;
+    } else {
+      return 0;
     }
+  }
+
+  // TODO cases where the typeCheckCache isn't authoritative
+  var cache = obj._STable.typeCheckCache;
+  if (cache) {
+    for (var i = 0; i < cache.length; i++) {
+      if (cache[i] === type) {
+        return 1;
+      }
+    }
+  } else {
+    /* If we get here, need to call .^type_check on the value we're
+     * checking. */
+
+    /* This "hack" is stolen from the JVM */
+    if (!obj._STable.HOW.type_check) {
+      return 0;
+    }
+
+    return nqp.toBool(obj._STable.HOW.type_check(ctx, null, obj, type));
   }
   return 0;
 };
 
 op.settypecache = function(obj, cache) {
-  obj._STable.type_check_cache = cache;
+  obj._STable.typeCheckCache = cache.array;
   return obj;
 };
 
@@ -315,7 +330,7 @@ op.setmethcache = function(obj, cache) {
   if (!cache instanceof Hash) {
     console.log('we expect a hash here');
   }
-  obj._STable.setMethodCache(cache.content);
+  obj._STable.setMethodCache(cache.$$toObject());
   return obj;
 };
 
@@ -326,7 +341,20 @@ op.setmethcacheauth = function(obj, isAuth) {
 };
 
 op.reprname = function(obj) {
-  return obj._STable.REPR.name;
+  if (obj._STable) {
+    return obj._STable.REPR.name;
+  } else if (obj instanceof Capture) {
+    return 'MVMCallCapture';
+  } else if (obj instanceof NQPInt) {
+    return 'P6int';
+  } else if (typeof obj == 'string') {
+    return 'P6str';
+  } else if (typeof obj == 'number') {
+    return 'P6num';
+  } else {
+    console.log(obj);
+    throw new Error('unsupported thing passed to reprname');
+  }
 };
 
 op.newtype = function(how, repr) {
@@ -335,11 +363,11 @@ op.newtype = function(how, repr) {
   }
   var REPR = new reprs[repr]();
   REPR.name = repr;
-  return REPR.type_object_for(how);
+  return REPR.typeObjectFor(how);
 };
 
 op.can = function(obj, method) {
-  return obj._STable.method_cache.hasOwnProperty(method) ? 1 : 0;
+  return obj._STable.methodCache.hasOwnProperty(method) ? 1 : 0;
 };
 
 op.getcodename = function(code) {
@@ -350,8 +378,8 @@ op.setcodename = function(code, name) {
   code.name = name;
 };
 
-op.rebless = function(obj, new_type) {
-  obj._STable.REPR.change_type(obj, new_type);
+op.rebless = function(obj, newType) {
+  obj._STable.REPR.changeType(obj, newType);
   return obj;
 };
 
@@ -362,8 +390,6 @@ op.composetype = function(obj, reprinfo) {
 op.clone = function(obj) {
   if (obj.$$clone) {
     return obj.$$clone();
-  } else if (obj instanceof Array) {
-    return obj.slice();
   } else {
     // STUB
     console.log('NYI cloning', obj);
@@ -371,40 +397,22 @@ op.clone = function(obj) {
   }
 };
 
-var where_counter = 0;
+var whereCounter = 0;
 op.where = function(obj) {
   if (obj._STable) { // HACK
     if (!obj._WHERE) {
-      obj._WHERE = ++where_counter;
+      obj._WHERE = ++whereCounter;
     }
     return obj._WHERE;
   } else {
-    throw 'WHERE on this type of thing unimplemented';
+    throw 'WHERE/objectid on this type of thing unimplemented';
   }
 };
 
+op.objectid = op.where;
 
 /* HACK - take the current HLL settings into regard */
 
-var hllsyms = {}
-op.bindcurhllsym = function(name, value) {
-  hllsyms[name] = value;
-  return value;
-};
-
-op.getcurhllsym = function(name) {
-  return hllsyms.hasOwnProperty(name) ? hllsyms[name] :  null;
-};
-
-op.settypehllrole = function(type, role) {
-  /* STUB */
-  return role;
-};
-
-op.sethllconfig = function(language, configHash) {
-  /* STUB */
-  return configHash;
-};
 
 var sha1 = require('sha1');
 
@@ -416,23 +424,12 @@ op.curlexpad = function(get, set) {
   return new CurLexpad(get, set);
 };
 
-op.setcontspec = function(type, cont_spec_type, hash) {
-  var fetch = hash.content.fetch;
-  var store = hash.content.store;
-  if (cont_spec_type === 'code_pair') {
-    type._STable.addInternalMethod('$$assignunchecked', function(ctx, value) {
-      store.$call(ctx, {}, this, value);
-      return value;
-    });
-    type._STable.addInternalMethod('$$assign', function(ctx, value) {
-      store.$call(ctx, {}, this, value);
-      return value;
-    });
-    type._STable.addInternalMethod('$$decont', function(ctx) {
-      return fetch.$call(ctx, {}, this);
-    });
+op.setcontspec = function(type, specType, conf) {
+  if (containerSpecs[specType]) {
+    type._STable.containerSpec = new containerSpecs[specType](type._STable);
+    type._STable.containerSpec.configure(conf);
   } else {
-    throw 'NYI cont spec: ' + cont_spec_type;
+    console.warn('NYI cont spec: ' + specType);
   }
 };
 
@@ -440,38 +437,60 @@ op.iscont = function(cont) {
   return cont.$$decont ? 1 : 0;
 };
 
+op.iscont_i = function(cont) {
+  // Stub
+  return 0;
+};
+
+op.iscont_n = function(cont) {
+  // Stub
+  return 0;
+};
+
+op.iscont_s = function(cont) {
+  // Stub
+  return 0;
+};
+
+op.isrwcont = function(cont) {
+  return cont.$$decont ? 1 : 0;
+};
+
 op.decont = function(ctx, cont) {
+  if (cont === null || cont === undefined) return cont;
   return cont.$$decont ? cont.$$decont(ctx) : cont;
 };
 
 op.box_n = function(n, type) {
   var repr = type._STable.REPR;
   var obj = repr.allocate(type._STable);
-  obj.$$set_num(n);
+  obj.$$setNum(n);
   return obj;
 };
 
 op.unbox_n = function(obj) {
-  return obj.$$get_num();
+  return obj.$$getNum();
 };
 
 op.box_s = function(value, type) {
   var repr = type._STable.REPR;
   var obj = repr.allocate(type._STable);
-  obj.$$set_str(value);
+  obj.$$setStr(value);
   return obj;
 };
 
 op.unbox_s = function(obj) {
-  return obj.$$get_str();
+  if (typeof obj == 'string') return obj;
+  return obj.$$getStr();
 };
 
 op.elems = function(obj) {
-  if (obj instanceof Array) {
-    return obj.length;
-  } else if (obj.$$elems) {
-    return obj.$$elems();
-  }
+  return obj.$$elems();
+};
+
+op.setelems = function(obj, elems) {
+  obj.$$setelems(elems);
+  return obj;
 };
 
 op.markcodestatic = function(code) {
@@ -485,8 +504,9 @@ op.markcodestub = function(code) {
 };
 
 op.freshcoderef = function(code) {
-  // TODO - think about static code info
-  return code.$$clone();
+  var fresh = code.$$clone();
+  fresh.staticCode = fresh;
+  return fresh;
 };
 
 /* TODO - make serialization take this into account */
@@ -500,18 +520,61 @@ op.popcompsc = function(sc) {
   return compilingSCs.pop();
 };
 
-var compilerRegistry = {};
+var compilerRegistry = new Map();
+
 op.bindcomp = function(language, compiler) {
-  return (compilerRegistry[language] = compiler);
+  compilerRegistry.set(language, compiler);
+  return compiler;
 };
 
-compilerRegistry['JavaScript'] = {
-  eval: function(ctx, named, code) {
-    return eval(code);
+function WrappedFunction(func) {
+  this.func = func;
+}
+
+WrappedFunction.prototype.$$apply = function(args) {
+  var converted = [];
+  for (var i = 2; i < args.length; i++) {
+    converted.push(toJS(args[i]));
   }
+  return fromJS(this.func.apply(null, converted));
 };
 
-compilerRegistry['nqp'] = {
+WrappedFunction.prototype.$$call = function(args) {
+  return this.$$apply(arguments);
+};
+
+function fromJS(obj) {
+  if (typeof obj === 'function') {
+    return new WrappedFunction(obj);
+  } else {
+    return obj;
+  }
+}
+
+function toJS(obj) {
+  if (obj instanceof NQPInt) {
+    return obj.value;
+  } else if (obj instanceof CodeRef) {
+    return function() {
+      var converted = [null, {}];
+      for (var i = 0; i < arguments.length; i++) {
+        converted.push(fromJS(arguments[i]));
+      }
+      return toJS(obj.$$apply(converted));
+    };
+  } else {
+    return obj;
+  }
+}
+
+compilerRegistry.set('JavaScript', {
+  eval: function(ctx, _NAMED, self, code) {
+    //console.log("evaling [", code, "]");
+    return fromJS(eval(code));
+  }
+});
+
+compilerRegistry.set('nqp', {
   backend: function(ctx, named) {
     return {
       name: function(ctx, named) {
@@ -519,16 +582,16 @@ compilerRegistry['nqp'] = {
       }
     };
   }
-};
+});
 
 
 op.getcomp = function(language) {
-  return compilerRegistry[language];
+  return compilerRegistry.has(language) ? compilerRegistry.get(language) : null;
 };
 
 op.backendconfig = function() {
   var config = new Hash();
-  config.content.intvalsize = 4;
+  config.content.set('intvalsize', 4);
   return config;
 };
 
@@ -541,16 +604,23 @@ op.getpid = function() {
 };
 
 op.getmessage = function(exception) {
-  return exception.msg;
+  return exception.message;
 };
 
-op.unshift = function(target, value) {
-  if (target.$$unshift) return target.$$unshift(value);
-  return target.unshift(value);
+op.setmessage = function(exception, message) {
+  return (exception.message = message);
+};
+
+op.getpayload = function(exception) {
+  return exception.payload;
+};
+
+op.setpayload = function(exception, payload) {
+  return (exception.payload = payload);
 };
 
 op.isnum = function(value) {
-  return (typeof value == "number") ? 1 : 0;
+  return (typeof value == 'number') ? 1 : 0;
 };
 
 op.isint = function(value) {
@@ -558,8 +628,10 @@ op.isint = function(value) {
 };
 
 function renameEncoding(encoding) {
-  return encoding == 'utf16' ? 'utf16le' : encoding;
+  return {utf16: 'utf16le', 'iso-8859-1': 'binary'}[encoding] || encoding;
 }
+
+exports.renameEncoding = renameEncoding;
 
 function byteSize(buf) {
   if (buf.bytes) return buf.bytes;
@@ -567,7 +639,7 @@ function byteSize(buf) {
   var bits = buf._STable.REPR.type._STable.REPR.bits;
 
   if (bits % 8) {
-    throw "only buffer sizes that are a multiple of 8 are supported";
+    throw 'only buffer sizes that are a multiple of 8 are supported';
   }
 
   return bits / 8;
@@ -582,15 +654,17 @@ op.encode = function(str, encoding_, buf) {
   var elementSize = byteSize(buf);
 
   var ret = [];
-  ret.bytes = elementSize;
 
   var buffer = new Buffer(str, encoding);
 
   var offset = 0;
-  for (var i=0; i < buffer.length / elementSize; i++) {
+  for (var i = 0; i < buffer.length / elementSize; i++) {
     ret[i] = buffer.readIntLE(offset, elementSize);
     offset += elementSize;
   }
+
+  ret = new NQPArray(ret);
+  ret.bytes = elementSize;
   return ret;
 };
 
@@ -598,10 +672,12 @@ op.decode = function(buf, encoding_) {
   var encoding = renameEncoding(encoding_);
   var elementSize = byteSize(buf);
 
+  buf = buf.array;
+
   var buffer = new Buffer(buf.length * elementSize);
 
   var offset = 0;
-  for (var i=0; i < buf.length; i++) {
+  for (var i = 0; i < buf.length; i++) {
     buffer.writeIntLE(buf[i], offset, elementSize);
     offset += elementSize;
   }
@@ -610,7 +686,8 @@ op.decode = function(buf, encoding_) {
 };
 
 op.objprimspec = function(obj) {
-  return (obj._STable && obj._STable.REPR.boxed_primitive ? obj._STable.REPR.boxed_primitive : 0);
+  if (obj === null) return 0;
+  return (obj._STable && obj._STable.REPR.boxedPrimitive ? obj._STable.REPR.boxedPrimitive : 0);
 };
 
 /* Parametricity operations. */
@@ -618,16 +695,18 @@ op.setparameterizer = function(ctx, type, parameterizer) {
   var st = type._STable;
   /* Ensure that the type is not already parametric or parameterized. */
   if (st.parameterizer) {
-    ctx.die("This type is already parametric");
+    ctx.die('This type is already parametric');
     return null;
   } else if (st.parametricType) {
-    ctx.die("Cannot make a parameterized type also be parametric");
+    ctx.die('Cannot make a parameterized type also be parametric');
     return null;
   }
 
   /* Set up the type as parameterized. */
   st.parameterizer = parameterizer;
   st.parameterizerCache = [];
+
+  st.modeFlags |= constants.PARAMETRIC_TYPE;
 
   return type;
 };
@@ -636,16 +715,18 @@ op.parameterizetype = function(ctx, type, params) {
   /* Ensure we have a parametric type. */
   var st = type._STable;
   if (!st.parameterizer) {
-    ctx.die("This type is not parametric");
+    ctx.die('This type is not parametric');
   }
+
+  var unpackedParams = params.array;
 
   var lookup = st.parameterizerCache;
   for (var i = 0; i < lookup.length; i++) {
-    if (params.length == lookup[i].params.length) {
+    if (unpackedParams.length == lookup[i].params.length) {
       var match = true;
-      for (var j=0; j < params.length; j++) {
+      for (var j = 0; j < unpackedParams.length; j++) {
         /* XXX More cases to consider here. - copied over from the jvm backend, need to consider what they are*/
-        if (params[j] != lookup[i].params[j]) {
+        if (unpackedParams[j] != lookup[i].params[j]) {
           match = false;
           break;
         }
@@ -657,21 +738,57 @@ op.parameterizetype = function(ctx, type, params) {
     }
   }
 
-  var result = st.parameterizer.$call(ctx, {}, st.WHAT, params);
+  var result = st.parameterizer.$$call(ctx, {}, st.WHAT, params);
 
   var newSTable = result._STable;
   newSTable.parametricType = type;
   newSTable.parameters = params;
+  newSTable.modeFlags |= constants.PARAMETERIZED_TYPE;
 
-  lookup.push({type: result, params: params});
+  lookup.push({type: result, params: unpackedParams});
 
   return result;
+};
+
+op.gcd_i = function(a, b) {
+  var c;
+  while (a != 0) {
+    c = a;
+    a = b % a;
+    b = c;
+  }
+  return b;
+};
+
+// TODO think about overflow
+op.lcm_i = function(a, b) {
+  return (a * b) / op.gcd_i(a, b);
+};
+
+op.mod_n = function(a, b) {
+  return a - Math.floor(a / b) * b;
+};
+
+op.sec_n = function(x) {
+  return 1 / Math.cos(x);
+};
+
+op.asec_n = function(x) {
+  return Math.acos(1 / x);
+};
+
+op.sech_n = function(x) {
+  return (2 * Math.cosh(x)) / (Math.cosh(2 * x) + 1);
+};
+
+op.isnanorinf = function(n) {
+  return (isNaN(n) || n == Infinity || n == -Infinity) ? 1 : 0;
 };
 
 function typeparameters(ctx, type) {
   var st = type._STable;
   if (!st.parametricType) {
-    ctx.die("This type is not parameterized");
+    ctx.die('This type is not parameterized');
   }
 
   return st.parameters;
@@ -680,11 +797,301 @@ function typeparameters(ctx, type) {
 op.typeparameters = typeparameters;
 
 op.typeparameterat = function(ctx, type, idx) {
-  return typeparameters(ctx, type)[idx];
+  return typeparameters(ctx, type).$$atpos(idx);
 };
 
 op.typeparameterized = function(type) {
   var st = type._STable;
   var nqp = require('nqp-runtime');
   return st.parametricType ? st.parametricType : null;
+};
+
+function startTrampoline(thunk_) {
+  var thunk = thunk_;
+  while (thunk) {
+    thunk = thunk();
+  }
+}
+
+var resetValue;
+var invokeValue;
+op.continuationreset = function(ctx, tag, continuation) {
+  startTrampoline(function() {
+    return continuation.$$callCPS(ctx, {}, function(value) {
+      resetValue = value;
+      invokeValue = value;
+      return null;
+    });
+  });
+  return resetValue;
+};
+
+op.continuationresetCPS = function(ctx, tag, continuation, continuation) {
+  console.log('continuation reset in CPS mode');
+};
+
+op.continuationcontrolCPS = function(ctx, protect, tag, run, cont) {
+  startTrampoline(run.$$callCPS(ctx, {}, function(value) {
+    resetValue = value;
+    return null;
+  }, cont));
+  return null;
+};
+
+op.continuationinvoke = function(ctx, cont, inject) {
+  // TODO really place inject inside the cont
+  var value = inject.$$call(ctx, {});
+  startTrampoline(cont(value));
+  return invokeValue;
+};
+
+op.continuationinvokeCPS = function(ctx, invokedCont, inject, cont) {
+  // TODO really place inject inside the cont, use callCPS
+  var value = inject.$$call(ctx, {});
+  return invokedCont(value);
+};
+
+var generator = Math;
+op.rand_n = function(limit) {
+  return generator.random() * limit;
+};
+
+
+op.srand = function(seed) {
+  var XorShift = require('xorshift').constructor;
+  generator = new XorShift([seed, 0, 0, 0]);
+  return seed;
+};
+
+op.getlexrel = function(pad, name) {
+  return pad.lookup(name);
+};
+
+
+op.bitand_s = function(a, b) {
+  var ret = '';
+  var i = 0;
+  while (true) {
+    var codepointA = a.codePointAt(i);
+    var codepointB = b.codePointAt(i);
+    if (codepointA === undefined || codepointB == undefined) {
+      return ret;
+    }
+    ret += String.fromCodePoint(codepointA & codepointB);
+    i++;
+  }
+};
+
+op.bitor_s = function(a, b) {
+  var ret = '';
+  var i = 0;
+  while (true) {
+    var codepointA = a.codePointAt(i);
+    var codepointB = b.codePointAt(i);
+    if (codepointA === undefined && codepointB == undefined) {
+      return ret;
+    }
+    if (codepointA === undefined) codepointA = 0;
+    if (codepointB === undefined) codepointB = 0;
+    ret += String.fromCodePoint(codepointA | codepointB);
+    i++;
+  }
+};
+
+op.bitxor_s = function(a, b) {
+  var ret = '';
+  var i = 0;
+  while (true) {
+    var codepointA = a.codePointAt(i);
+    var codepointB = b.codePointAt(i);
+    if (codepointA === undefined && codepointB == undefined) {
+      return ret;
+    }
+    if (codepointA === undefined) codepointA = 0;
+    if (codepointB === undefined) codepointB = 0;
+    ret += String.fromCodePoint(codepointA ^ codepointB);
+    i++;
+  }
+};
+
+op.replace = function(str, offset, count, repl) {
+  return str.substr(0, offset) + repl + str.substr(offset + count);
+};
+
+op.getcodelocation = function(code) {
+  var hash = new Hash();
+  hash.content.set('file', 'unknown');
+  hash.content.set('line', new NQPInt(-1));
+  return hash;
+};
+
+op.getcodecuid = function(codeRef) {
+  return codeRef.cuid;
+};
+
+op.numdimensions = function(array) {
+  return array.$$numdimensions();
+};
+
+op.dimensions = function(array) {
+  return array.$$dimensions();
+};
+
+op.setdimensions = function(array, dimensions) {
+  array.$$setdimensions(dimensions);
+  return dimensions;
+};
+
+// TODO optimize
+
+['_n', '_s', '_i', ''].forEach(function(type) {
+  op['atposnd' + type] = function(array, idx) {
+    return array['$$atposnd' + type](idx);
+  };
+
+  op['bindposnd' + type] = function(array, idx, value) {
+    return array['$$bindposnd' + type](idx, value);
+  };
+
+  op['atpos2d' + type] = function(array, x, y) {
+    return op['atposnd' + type](array, new NQPArray([x, y]));
+  };
+
+  op['atpos3d' + type] = function(array, x, y, z) {
+    return op['atposnd' + type](array, new NQPArray([x, y, z]));
+  };
+
+  op['bindpos2d' + type] = function(array, x, y, value) {
+    return op['bindposnd' + type](array, new NQPArray([x, y]), value);
+  };
+
+  op['bindpos3d' + type] = function(array, x, y, z, value) {
+    return op['bindposnd' + type](array, new NQPArray([x, y, z]), value);
+  };
+});
+
+var BOOTException = bootstrap.bootType('BOOTException', 'VMException');
+/* TODO HLL support */
+op.newexception = function() {
+  var exType = BOOTException;
+  return exType._STable.REPR.allocate(exType._STable);
+};
+
+function EvalResult(mainline, codeRefs) {
+  this.mainline = mainline;
+  this.codeRefs = codeRefs;
+}
+
+exports.EvalResult = EvalResult;
+
+op.iscompunit = function(obj) {
+  return obj instanceof EvalResult ? 1 : 0;
+};
+
+op.compunitmainline = function(cu) {
+  return cu.mainline;
+};
+
+op.compunitcodes = function(cu) {
+  return cu.codeRefs;
+};
+
+op.getstaticcode = function(codeRef) {
+  return codeRef.staticCode;
+};
+
+
+var MAX_ARITY = 4;
+var MAX_PER_ARITY = 16;
+
+function MultiCache() {
+  this.cache = [];
+  for (var i = 0; i < MAX_ARITY; i++) {
+    this.cache[i] = [];
+  }
+}
+
+function posTypes(capture) {
+  var arity = capture.pos.length;
+  var types = new Array(arity);
+  for (var i = 0; i < arity; i++) {
+    var obj = capture.pos[i];
+    if (obj._STable) {
+      types[i] = obj._STable;
+    } else if (obj instanceof NQPInt) {
+      types[i] = 1;
+    } else if (typeof obj == 'number') {
+      types[i] = 2;
+    } else if (typeof obj == 'string') {
+      types[i] = 3;
+    }
+  }
+  return types;
+}
+
+op.multicachefind = function(cache, capture) {
+  if (!cache) return null;
+  var arity = capture.pos.length;
+  var hasNamed = capture.named ? true : false;
+
+  if (arity == 0) {
+    if (!hasNamed && cache.zeroArity) {
+      return cache.zeroArity;
+    } else {
+      return null;
+    }
+  }
+
+  if (arity > MAX_ARITY) return null;
+
+  var types = posTypes(capture);
+
+  var arityCache = cache.cache[arity - 1];
+
+  CANDIDATES: for (var i = 0; i < arityCache.length; i++) {
+    for (var j = 0; j < arityCache[i].types.length; j++) {
+      if (arityCache[i].types[j] !== types[j]) continue CANDIDATES;
+    }
+    if (arityCache[i].hasNamed !== hasNamed) continue CANDIDATES;
+    return arityCache[i].result;
+  }
+
+  return null;
+};
+
+op.multicacheadd = function(cache, capture, result) {
+  var c = cache ? cache : new MultiCache();
+  var arity = capture.pos.length;
+  var hasNamed = capture.named ? true : false;
+
+  if (arity == 0) {
+    if (!hasNamed) {
+      c.zeroArity = result;
+    }
+    return c;
+  }
+
+  if (arity > MAX_ARITY || c.cache[arity - 1].length > MAX_PER_ARITY) {
+    return c;
+  }
+
+  c.cache[arity - 1].push({types: posTypes(capture), hasNamed: hasNamed, result: result});
+  return c;
+};
+
+op.backtracestrings = function(exception) {
+  return new NQPArray(['backtrace NYI']);
+};
+
+op.hintfor = function(classHandle, attrName) {
+  if (!classHandle._STable.REPR.hintfor) return -1;
+  return classHandle._STable.REPR.hintfor(classHandle, attrName);
+};
+
+op.ctxcaller = function(ctx) {
+  return ctx.caller;
+};
+
+op.captureposprimspec = function(capture, idx) {
+  return 0;
 };

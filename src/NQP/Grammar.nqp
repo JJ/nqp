@@ -420,14 +420,14 @@ grammar NQP::Grammar is HLL::Grammar {
             if $*SCOPE eq 'our' || $*SCOPE eq '' {
                 $*W.install_package_symbol($*OUTERPACKAGE, $<name><identifier>, $*PACKAGE);
                 if +$<name><identifier> == 1 {
-                    $*W.install_lexical_symbol($OUTER, $<name><identifier>[0], $*PACKAGE);
+                    $*W.install_lexical_symbol($OUTER, ~$<name><identifier>[0], $*PACKAGE);
                 }
             }
             elsif $*SCOPE eq 'my' {
                 if +$<name><identifier> != 1 {
                     $<name>.CURSOR.panic("A my scoped package cannot have a multi-part name yet");
                 }
-                $*W.install_lexical_symbol($OUTER, $<name><identifier>[0], $*PACKAGE);
+                $*W.install_lexical_symbol($OUTER, ~$<name><identifier>[0], $*PACKAGE);
             }
             else {
                 $/.CURSOR.panic("$*SCOPE scoped packages are not supported");
@@ -435,6 +435,8 @@ grammar NQP::Grammar is HLL::Grammar {
         }
 
         [ $<export>=['is export'] ]?
+        [ $<nativesize>=['is nativesize(' $<size>=[\d+] ')' ] ]?
+        [ $<unsigned>=['is unsigned'] ]?
         [ 'is' <parent=.name> ]?
         [ 'does' <role=.name> ]*
         [
@@ -623,14 +625,6 @@ grammar NQP::Grammar is HLL::Grammar {
         <deflongname> <args>
     }
 
-    token term:sym<pir::op> {
-        'pir::' $<op>=[\w+] <args>**0..1
-    }
-
-    token term:sym<pir::const> {
-        'pir::const::' $<const>=[\w+]
-    }
-
     token term:sym<nqp::op> {
         'nqp::' $<op>=[\w+] <args>**0..1
     }
@@ -679,7 +673,6 @@ grammar NQP::Grammar is HLL::Grammar {
     token quote:sym<q>    { <sym> >> <![(]> <.ws> <quote_EXPR: ':q'>  }
     token quote:sym<qq>   { <sym> >> <![(]> <.ws> <quote_EXPR: ':qq'> }
     token quote:sym<Q>    { <sym> >>  <![(]> <.ws> <quote_EXPR> }
-    token quote:sym<Q:PIR> { <sym> <.ws> <quote_EXPR> }
     token quote:sym</ />  {
         '/'
         <.newpad>
@@ -879,4 +872,3 @@ grammar NQP::Regex is QRegex::P6Regex::Grammar {
         <quote_EXPR=.LANG('MAIN','quote_EXPR')>
     }
 }
-

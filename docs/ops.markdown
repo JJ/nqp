@@ -1,3 +1,296 @@
+# TABLE OF CONTENTS
+- [NQP Opcodes](#nqp-opcodes)
+- [Arithmetic Opcodes](#-arithmetic-opcodes)
+    - [abs](#abs)
+    - [add](#add)
+    - [div](#div)
+    - [gcd](#gcd)
+    - [lcm](#lcm)
+    - [mod](#mod)
+    - [mul](#mul)
+    - [neg](#neg)
+    - [sub](#sub)
+- [Numeric Opcodes](#-numeric-opcodes)
+    - [base](#base)
+    - [ceil](#ceil)
+    - [exp](#exp)
+    - [floor](#floor)
+    - [inf](#inf)
+    - [log](#log)
+    - [ln](#ln)
+    - [expmod](#expmod)
+    - [nan](#nan)
+    - [neginf](#neginf)
+    - [pow](#pow)
+    - [rand](#rand)
+    - [sqrt](#sqrt)
+- [Trigonometric Opcodes](#-trigonometric-opcodes)
+    - [asec](#asec)
+    - [asin](#asin)
+    - [acos](#acos)
+    - [atan](#atan)
+    - [atan2](#atan2)
+    - [cos](#cos)
+    - [cosh](#cosh)
+    - [sin](#sin)
+    - [sinh](#sinh)
+    - [sec](#sec)
+    - [sech](#sech)
+    - [tan](#tan)
+    - [tanh](#tanh)
+- [Relational / Logic Opcodes](#-relational--logic-opcodes)
+    - [cmp](#cmp)
+    - [eqat](#eqat)
+    - [iseq](#iseq)
+    - [isgt](#isgt)
+    - [isge](#isge)
+    - [islt](#islt)
+    - [isle](#isle)
+    - [isne](#isne)
+    - [not](#not)
+- [Array Opcodes](#-array-opcodes)
+    - [atpos](#atpos)
+    - [bindpos](#bindpos)
+    - [elems](#elems)
+    - [existspos](#existspos)
+    - [list](#list)
+    - [push](#push)
+    - [pop](#pop)
+    - [setelems](#setelems)
+    - [shift](#shift)
+    - [splice](#splice)
+    - [unshift](#unshift)
+    - [iterator](#iterator)
+- [Hash Opcodes](#-hash-opcodes)
+    - [atkey](#atkey)
+    - [bindkey](#bindkey)
+    - [existskey](#existskey)
+    - [deletekey](#deletekey)
+    - [iterkey](#iterkey)
+    - [iterval](#iterval)
+- [String Opcodes](#-string-opcodes)
+    - [chars](#chars)
+    - [chr](#chr)
+    - [codepointfromname](#codepointfromname)
+    - [concat](#concat)
+    - [decode](#decode)
+    - [decodetocodes](#decodetocodes)
+    - [encode](#encode)
+    - [encodefromcodes](#encodefromcodes)
+    - [encodenorm](#encodenorm)
+    - [escape](#escape)
+    - [findcclass](#findcclass)
+    - [findnotcclass](#findnotcclass)
+    - [flip](#flip)
+    - [hash](#hash)
+    - [index](#index)
+    - [iscclass](#iscclass)
+    - [join](#join)
+    - [lc](#lc)
+    - [normalizecodes](#normalizecodes)
+    - [ord](#ord)
+    - [radix](#radix)
+    - [replace](#replace)
+    - [rindex](#rindex)
+    - [uc](#uc)
+    - [split](#split)
+    - [strfromcodes](#strfromcodes)
+    - [strtocodes](#strtocodes)
+    - [substr](#substr)
+    - [tc](#tc)
+    - [x](#x)
+    - [sprintf](#sprintf)
+    - [sprintfdirectives](#sprintfdirectives)
+    - [sprintfaddargumenthandler](#sprintfaddargumenthandler)
+- [Unicode Property Opcodes](#-unicode-property-opcodes)
+    - [getuniname](#getuniname)
+    - [unipropcode](#unipropcode)
+    - [unipvalcode](#unipvalcode)
+    - [getuniprop_int](#getuniprop_int)
+    - [getuniprop_str](#getuniprop_str)
+    - [getuniprop_bool](#getuniprop_bool)
+    - [matchuniprop](#matchuniprop)
+- [Conditional Opcodes](#-conditional-opcodes)
+    - [if](#if)
+    - [unless](#unless)
+- [Loop/Control Opcodes](#-loopcontrol-opcodes)
+    - [control](#control)
+    - [defor](#defor)
+    - [for](#for)
+    - [ifnull](#ifnull)
+    - [repeat_until](#repeat_until)
+    - [repeat_while](#repeat_while)
+    - [until](#until)
+    - [while](#while)
+- [Exceptional Opcodes](#-exceptional-opcodes)
+    - [backtrace](#backtrace)
+    - [backtracestrings](#backtracestrings)
+    - [die](#die)
+    - [exception](#exception)
+    - [getextype](#getextype)
+    - [getmessage](#getmessage)
+    - [getpayload](#getpayload)
+    - [newexception](#newexception)
+    - [resume](#resume)
+    - [rethrow](#rethrow)
+    - [setextype](#setextype)
+    - [setmessage](#setmessage)
+    - [setpayload](#setpayload)
+    - [throw](#throw)
+- [Input/Output Opcodes](#-inputoutput-opcodes)
+    - [closefh](#closefh)
+    - [eoffh](#eoffh)
+    - [flushfh](#flushfh)
+    - [getcfh](#getcfh)
+    - [getstderr](#getstderr)
+    - [getstdin](#getstdin)
+    - [getstdout](#getstdout)
+    - [open](#open)
+    - [openasync `jvm`](#openasync-jvm)
+    - [print](#print)
+    - [printfh](#printfh)
+    - [readallfh](#readallfh)
+    - [readfh](#readfh)
+    - [readlinefh](#readlinefh)
+    - [readcharsfh](#readcharsfh)
+    - [say](#say)
+    - [sayfh](#sayfh)
+    - [setencoding](#setencoding)
+    - [setinputlinesep](#setinputlinesep)
+    - [tellfh](#tellfh)
+    - [writefh](#writefh)
+- [External command Opcodes](#-external-command-opcodes)
+    - [shell](#shell)
+    - [spawn](#spawn)
+- [File / Directory / Network Opcodes](#-file--directory--network-opcodes)
+    - [chdir](#chdir)
+    - [chmod](#chmod)
+    - [closedir](#closedir)
+    - [copy](#copy)
+    - [cwd](#cwd)
+    - [fileexecutable](#fileexecutable)
+    - [fileislink](#fileislink)
+    - [filereadable](#filereadable)
+    - [filewritable](#filewritable)
+    - [link](#link)
+    - [mkdir](#mkdir)
+    - [nextfiledir](#nextfiledir)
+    - [opendir](#opendir)
+    - [rename](#rename)
+    - [rmdir](#rmdir)
+    - [stat](#stat)
+    - [stat_time](#stat_time)
+    - [lstat](#lstat)
+    - [stat_time](#stat_time)
+    - [symlink](#symlink)
+    - [unlink](#unlink)
+- [Type/Conversion Opcodes](#-typeconversion-opcodes)
+    - [bool](#bool)
+    - [bootarray `jvm` `moar`](#bootarray-jvm-moar)
+    - [boothash `jvm` `moar`](#boothash-jvm-moar)
+    - [bootint `jvm` `moar`](#bootint-jvm-moar)
+    - [bootintarray `jvm` `moar`](#bootintarray-jvm-moar)
+    - [bootnum `jvm` `moar`](#bootnum-jvm-moar)
+    - [bootnumarray `jvm` `moar`](#bootnumarray-jvm-moar)
+    - [bootstr `jvm` `moar`](#bootstr-jvm-moar)
+    - [bootstrarray `jvm` `moar`](#bootstrarray-jvm-moar)
+    - [box](#box)
+    - [defined](#defined)
+    - [fromnum](#fromnum)
+    - [fromstr](#fromstr)
+    - [isbig](#isbig)
+    - [isconcrete](#isconcrete)
+    - [iscont](#iscont)
+    - [isfalse](#isfalse)
+    - [ishash](#ishash)
+    - [isint](#isint)
+    - [isinvokable](#isinvokable)
+    - [islist](#islist)
+    - [isnanorinf](#isnanorinf)
+    - [isnull](#isnull)
+    - [isnum](#isnum)
+    - [isprime](#isprime)
+    - [isstr](#isstr)
+    - [istrue](#istrue)
+    - [istype](#istype)
+    - [null](#null)
+    - [jvmisnull `jvm`](#jvmisnull-jvm)
+    - [tostr](#tostr)
+    - [tonum](#tonum)
+    - [unbox](#unbox)
+- [OO/SixModel Opcodes](#-oosixmodel-opcodes)
+    - [bindattr](#bindattr)
+    - [bindcomp](#bindcomp)
+    - [callmethod](#callmethod)
+    - [can](#can)
+    - [clone](#clone)
+    - [create](#create)
+    - [eqaddr](#eqaddr)
+    - [findmethod](#findmethod)
+    - [getattr](#getattr)
+    - [getcomp](#getcomp)
+    - [how](#how)
+    - [rebless](#rebless)
+    - [reprname](#reprname)
+    - [setwho](#setwho)
+    - [who](#who)
+    - [what](#what)
+    - [where](#where)
+- [Bit Opcodes](#-bit-opcodes)
+    - [bitand](#bitand)
+    - [bitneg](#bitneg)
+    - [bitor](#bitor)
+    - [bitshiftl](#bitshiftl)
+    - [bitshiftr](#bitshiftr)
+    - [bitxor](#bitxor)
+- [Context Introspection Opcodes](#-context-introspection-opcodes)
+    - [ctx](#ctx)
+    - [ctxcaller](#ctxcaller)
+    - [ctxlexpad](#ctxlexpad)
+    - [curlexpad](#curlexpad)
+    - [ctxouter](#ctxouter)
+    - [lexprimspec](#lexprimspec)
+    - [savecapture](#savecapture)
+    - [usecapture](#usecapture)
+    - [getlex](#getlex)
+    - [bindlex](#bindlex)
+    - [getlexdyn](#getlexdyn)
+    - [bindlexdyn](#bindlexdyn)
+    - [getlexouter](#getlexouter)
+    - [getlexcaller](#getlexcaller)
+    - [getlexrel](#getlexrel)
+    - [getlexreldyn](#getlexreldyn)
+    - [getlexrelcaller](#getlexrelcaller)
+- [Variable Opcodes](#-variable-opcodes)
+    - [bind](#bind)
+- [Miscellaneous Opcodes](#-miscellaneous-opcodes)
+    - [const](#const)
+    - [debugnoop](#debugnoop)
+    - [exit](#exit)
+    - [getenvhash](#getenvhash)
+    - [backendconfig](#backendconfig)
+    - [getpid](#getpid)
+    - [jvmclasspaths `jvm`](#jvmclasspaths-jvm)
+    - [sha1](#sha1)
+    - [sleep](#sleep)
+    - [takeclosure](#takeclosure)
+    - [time](#time)
+- [Native Call / Interoperability Opcodes](#-native-call--interoperability-opcodes)
+    - [x_posixerrno](#x_posixerrno)
+- [Asynchronous Operations](#-asynchronous-operations)
+    - [cancel](#cancel)
+    - [timer](#timer)
+    - [signal](#signal)
+    - [watchfile](#watchfile)
+    - [asyncconnect](#asyncconnect)
+    - [asynclisten](#asynclisten)
+    - [asyncwritestr](#asyncwritestr)
+    - [asyncwritebytes](#asyncwritebytes)
+    - [asyncreadchars](#asyncreadchars)
+    - [asyncreadbytes](#asyncreadbytes)
+    - [spawnprocasync](#spawnprocasync)
+    - [killprocasync](#killprocasync)
+
 # NQP Opcodes
 
 Opcodes (ops) are used both directly when writing NQP, and during code
@@ -434,7 +727,7 @@ Replace them with all the elements from `@from`.
 "Shift $v into the beginning of @arr."
 Bind $v to @arr at index 0, move all other bindings of @arr to the index one
 above what they were previously bound to.
-Return the number of elements of @arr on Parrot, $v on JVM.
+Return the $v on JVM.
 
 ## iterator
 * `iterator()`
@@ -532,7 +825,7 @@ Returns an (NFG) string resulting from decoding the specified buffer assuming
 the specified encoding.
 
 ## decodetocodes
-* `decodetocodes`($buffer, str $encoding, int $normalization, $codes)
+* `decodetocodes($buffer, str $encoding, int $normalization, $codes)`
 
 Decodes the bytes in the specified buffer using the provided encoding. Applies
 normalization as requested (must be one of the nqp::const::NORMALIZE_* values;
@@ -546,13 +839,13 @@ Encodes an (NFG) string into the specified encoding, writing into the buffer
 provided. The data written is normalized according to NFC.
 
 ## encodefromcodes
-* `encodefromcodes($codes, str $encoding, $buffer)
+* `encodefromcodes($codes, str $encoding, $buffer)`
 
 Takes a 32-bit integer array of Unicode codepoints, encodes them using the
 chosen encoding, and writes them into the buffer. No normalization is applied.
 
 ## encodenorm
-* `encode(str $string, str $encoding, int $normalization, $buffer)
+* `encode(str $string, str $encoding, int $normalization, $buffer)`
 
 Encodes an (NFG) string into the specified encoding, writing into the buffer
 provided. The data written is normalized according to the normalization value
@@ -626,7 +919,7 @@ fields separated by the value of EXPR, and returns that new string.
 Return lowercase copy of string.
 
 ## normalizecodes
-* `normalizecodes($codes-in, int $normalization, $codes-out)
+* `normalizecodes($codes-in, int $normalization, $codes-out)`
 
 Takes the codepoints in $codes-in, applies the specified normalization, and
 places the result into the $codes-out array. Both arrays of codepoints must
@@ -705,7 +998,7 @@ Returns an (NFG) string built from the specified codepoints, which must be
 provided as a 32-bit integer array.
 
 ## strtocodes
-* `strtocodes(str $str, int $normalization, $codes)
+* `strtocodes(str $str, int $normalization, $codes)`
 
 Takes an NFG string, and places the codepoints from it into the codes array,
 which must be a 32-bit integer array. Applies the specified normalization,
@@ -828,6 +1121,21 @@ If not, and an `$else` block is present, run that instead.
 
 # <a id="control"></a> Loop/Control Opcodes
 
+## control
+* `QAST::Op.new(:op<control>, :name<next>);`
+* `QAST::Op.new(:op<control>, :name<last>);`
+* `QAST::Op.new(:op<control>, :name<redo>);`
+
+Not callable directly from NQP, but used in languages via QAST to perform loop
+control. The specific kind of loop control desired is specified via the
+`:name` attribute; either `next`, `last`, or `redo`.
+
+## defor
+* `defor(Block $cond, Block $body)`
+
+If the `$cond` evaluates to defined value, return it, otherwise, evaluate
+the `$body`.
+
 ## for
 * `for(Iterable $iter, Block $body)`
 
@@ -838,12 +1146,6 @@ Invoke the `$body` for every item available in `$iter`.
 
 If the `$cond` evaluates to null, evaluate the `$body`, otherwise return
 the result of `$cond`.
-
-## defor
-* `defor(Block $cond, Block $body)`
-
-If the `$cond` evaluates to defined value, return it, otherwise, evaluate
-the `$body`.
 
 ## repeat_until
 * `repeat_until(Block $condition, Block $body)`
@@ -863,6 +1165,21 @@ only if the condition returns a non-0 value.
 
 If a `$post` block is present, run that at the end, regardless of `$condition`.
 
+## stmts
+* `stmts(...)`
+
+Executes the given statements sequentially. For example:
+
+```perl
+
+nqp::stmts((my $a := nqp::chars("foo")), say($a), say("bar"));
+# 3
+# bar
+
+```
+
+Note that `:=` statements must be surrounded by parentheses.
+
 ## until
 * `until(Block $condition, Block $body)`
 * `until(Block $condition, Block $body, Block $post)`
@@ -878,15 +1195,6 @@ If a `$post` block is present, run that at the end, regardless of `$condition`.
 Enter a loop, running the `$body` only if the condition returns a non-0 value.
 
 If a `$post` block is present, run that at the end, regardless of `$condition`.
-
-## control
-* `QAST::Op.new(:op<control>, :name<next>);`
-* `QAST::Op.new(:op<control>, :name<last>);`
-* `QAST::Op.new(:op<control>, :name<redo>);`
-
-Not callable directly from NQP, but used in languages via QAST to perform loop
-control. The specific kind of loop control desired is specified via the
-`:name` attribute; either `next`, `last`, or `redo`.
 
 # <a id="exceptions"></a> Exceptional Opcodes
 
@@ -1038,7 +1346,10 @@ in the next `$count` bytes from the filehandle and store them in the array.
 Return the next line of the open filehandle.
 
 ## readcharsfh
-* `nqp::readcharsfh(Handle $fh, $chars)`
+* `readcharsfh(Handle $fh, int $count)`
+
+Given a readable `$fh`, read in the next `$count` bytes from the filehandle
+and return them as a string.
 
 ## say
 * `say(str $str)`
@@ -1271,11 +1582,24 @@ Returns preferred I/O size in bytes for interacting with the file.
 
 Returns number of system-specific blocks allocated on disk.
 
+## stat_time
+* `stat_time(str $path, int $code)`
+
+Given a path and one of the `STAT_*TIME` codes, return that time attribute as
+a num, using the OS's stat() function.
+
 ## lstat
 * `lstat(str $path, int $code)`
 
 Same as stat, but internally uses the OS's lstat() function, which does *not*
 follow symlinks.
+
+## lstat_time
+* `stat_time(str $path, int $code)`
+
+Same as stat_time, but internally uses the OS's lstat() function, which does
+*not* follow symlinks.
+
 
 ## symlink
 * `symlink(str $before, str $after)`
@@ -1472,6 +1796,13 @@ Given a Perl 6 object, return a native with the same value,
 of the type indicated by the opcode suffix.
 
 # <a id="sixmodel"></a> OO/SixModel Opcodes
+
+## attrinited
+* `attrinited(Mu $obj. Mu:T $type, str $attributename)`
+ 
+Test if the attribute of name `$attributename` of object `$obj`
+has been binded, see `bindattr`. Note that any access to the atribute
+that results in a `getattr` call causes it to be inited.
 
 ## bindattr
 * `bindattr(Mu $obj, Mu:T $type, str $attributename, Mu $new_value)`
@@ -1840,6 +2171,47 @@ constants below can be used in nqp as (e.g.) `nqp::const::CCLASS_ANY`.
     * TYPE_CHECK_CACHE_THEN_METHOD
     * TYPE_CHECK_NEEDS_ACCEPTS
 
+The JVM only supports SIG_INT and SIG_KILL.
+
+On the MoarVM all of those signal constants below are defined.
+
+    * SIG_HUP
+    * SIG_INT
+    * SIG_QUIT
+    * SIG_ILL
+    * SIG_TRAP
+    * SIG_ABRT
+    * SIG_EMT
+    * SIG_FPE
+    * SIG_KILL
+    * SIG_BUS
+    * SIG_SEGV
+    * SIG_SYS
+    * SIG_PIPE
+    * SIG_ALRM
+    * SIG_TERM
+    * SIG_URG
+    * SIG_STOP
+    * SIG_TSTP
+    * SIG_CONT
+    * SIG_CHLD
+    * SIG_TTIN
+    * SIG_TTOU
+    * SIG_IO
+    * SIG_XCPU
+    * SIG_XFSZ
+    * SIG_VTALRM
+    * SIG_PROF
+    * SIG_WINCH
+    * SIG_INFO
+    * SIG_USR1
+    * SIG_USR2
+    * SIG_THR
+    * SIG_STKFLT
+    * SIG_PWR
+    * SIG_BREAK
+
+
 ## debugnoop
 * `debugnoop(Mu $a)`
 
@@ -1902,6 +2274,9 @@ an integral number of seconds, `_n` returns a fractional amount.
 * `x_posixerrno()`
 
 Returns an int that corresponds to the value of POSIX's errno.
+
+## nativecallrefresh
+Refresh the C-based data backing the Perl 6 object. This op should only be used if changes have been made to the C-data, and these changes are not being reflected in the Perl 6 object.
 
 # <a id="async"></a> Asynchronous Operations
 
@@ -2004,4 +2379,4 @@ Cancel to stop reading.
 * `spawnprocasync($queue, $args, $cwd, %env, $callbacks)`
 
 ## killprocasync
-* `nqp::killprocasync($handle, $signal)`
+* killprocasync($handle, $signal)`

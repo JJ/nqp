@@ -27,8 +27,7 @@ sub rule($target, $source, *@actions) {
     $target;
 }
 
-sub nqp($prefix, $file, $stage, :$deps=[]) {
-    my $source := $prefix ~ '/' ~ $file ~ '.nqp';
+sub nqp($prefix, $file, $stage, :$source=$prefix ~ '/' ~ $file ~ '.nqp', :$deps=[]) {
     my $path := stage_path($stage);
     my $mbc := $path ~ $file ~ '.moarvm';
 
@@ -62,7 +61,7 @@ sub combine(:$sources, :$stage, :$file, :$gen-version = 0) {
     ); 
 }
 
-sub cross-compile(:$stage, :$source, :$target, :$setting='NQPCORE', :$no-regex-lib, :$deps = []) {
+sub cross-compile(:$stage, :$source, :$target, :$setting='NQPCORE', :$no-regex-lib=1, :$deps = []) {
     my $path := stage_path($stage);
     my $moarvm := $path ~ $target ~ '.moarvm';
     # todo dependency on compiler
@@ -76,7 +75,7 @@ sub cross-compile(:$stage, :$source, :$target, :$setting='NQPCORE', :$no-regex-l
     rule($moarvm, nqp::join(' ', $deps), 
         make_parents($moarvm),
         make_parents($js),
-	"\$(JS_NQP) --module-path gen/js/stage1 src/vm/js/bin/cross-compile.nqp --setting=$setting --target=mbc --output $moarvm $source > $js"
+	"\$(JS_NQP) --module-path gen/js/stage1 src/vm/js/bin/cross-compile.nqp --setting=$setting --target=mbc --output $moarvm {$no-regex-lib ?? "--no-regex-lib" !! ""} $source > $js"
         );
 }
 
@@ -91,9 +90,13 @@ constant('JS_STAGE1','$(JS_BUILD_DIR)/stage1');
 constant('JS_STAGE2','$(JS_BUILD_DIR)/stage2');
 constant('JS_NQP','./$(M_RUNNER)$(BAT)');
 
+
 say('js-runner-default: js-all');
 
-my $stage1-qast-compiler-moar := nqp('src/vm/js','QAST/Compiler',1);
+my $QASTCompiler-combined := combine(:stage(1), :sources('src/vm/js/Utils.nqp src/vm/js/SerializeOnce.nqp src/vm/js/const_map.nqp src/vm/js/LoopInfo.nqp src/vm/js/ReturnInfo.nqp src/vm/js/BlockBarrier.nqp src/vm/js/DWIMYNameMangling.nqp src/vm/js/Chunk.nqp src/vm/js/Operations.nqp src/vm/js/RegexCompiler.nqp src/vm/js/Compiler.nqp'), :file('QASTCompiler'));
+
+
+my $stage1-qast-compiler-moar := nqp('src/vm/js','QAST/Compiler',1, :source($QASTCompiler-combined));
 my $stage1-hll-backend-moar := nqp('src/vm/js','HLL/Backend',1,:deps([$stage1-qast-compiler-moar]));
 
 constant('JS_STAGE1_COMPILER',"$stage1-qast-compiler-moar $stage1-hll-backend-moar");
@@ -115,6 +118,8 @@ my $QASTNode-moarvm := cross-compile(:stage(2), :source($QASTNode-combined), :ta
 my $QRegex-combined := combine(:stage(2), :sources('$(QREGEX_SOURCES)'), :file('$(QREGEX_COMBINED)'));
 my $QRegex-moarvm := cross-compile(:stage(2), :source($QRegex-combined), :target('QRegex'), :setting('NQPCORE'), :no-regex-lib(1), :deps([$nqpcore-moarvm, $QASTNode-moarvm]));
 
+my $sprintf-moarvm := cross-compile(:stage(2), :source('src/HLL/sprintf.nqp'), :target('sprintf'), :setting('NQPCORE'), :deps([$nqpcore-moarvm, $QRegex-moarvm]), :no-regex-lib(0)); 
+
 deps('js-stage1-compiler', '$(JS_STAGE1_COMPILER)');
 
 say('js-test: js-all gen/js/qregex.t
@@ -130,15 +135,15 @@ say("\n\njs-clean:
 	\$(RM_RF) gen/js/stage1 gen/js/stage2
 ");
 
-deps("js-all", 'm-all', 'js-stage1-compiler', 'node_modules/runtime_copied',$nqpcore-moarvm, $nqpcore-combined, $QASTNode-moarvm, $QRegex-moarvm);
+deps("js-all", 'm-all', 'js-stage1-compiler', 'node_modules/runtime_copied',$nqpcore-moarvm, $nqpcore-combined, $QASTNode-moarvm, $QRegex-moarvm, $sprintf-moarvm);
 
 # Enforce the google coding standards
 say("js-lint:
 	gjslint --strict --max_line_length=200 --nojsdoc src/vm/js/nqp-runtime/*.js");
 
 say('node_modules/npm_installed: src/vm/js/nqp-runtime/package.json
-	mkdir node_modules
-	npm install src/vm/js/nqp-runtime
+	$(MKPATH) node_modules
+	npm install src/vm/js/nqp-runtime tap
 	touch node_modules/npm_installed');
 
 say('node_modules/runtime_copied: node_modules/npm_installed src/vm/js/nqp-runtime/*.js
@@ -161,7 +166,7 @@ my $hll-combined := combine(:stage(2), :sources('$(JS_HLL_SOURCES)'), :file('$(H
 
 
 
-my $QAST-Compiler-moarvm := cross-compile(:stage(2), :source('src/vm/js/QAST/Compiler.nqp'), :target('QAST/Compiler'), :setting('NQPCORE'), :no-regex-lib(1), :deps([$nqpcore-moarvm, $QASTNode-moarvm]));
+my $QAST-Compiler-moarvm := cross-compile(:stage(2), :source($QASTCompiler-combined), :target('QAST/Compiler'), :setting('NQPCORE'), :no-regex-lib(1), :deps([$nqpcore-moarvm, $QASTNode-moarvm]));
 
 
 my $QAST-moarvm := cross-compile(:stage(2), :source('src/vm/js/QAST.nqp'), :target('QAST'), :setting('NQPCORE'), :no-regex-lib(1), :deps([$nqpcore-moarvm, $QAST-Compiler-moarvm]));
@@ -171,7 +176,11 @@ my $hll-moar := cross-compile(:stage(2), :source($hll-combined), :target('NQPHLL
 
 my $p6qregex-combined := combine(:stage(2), :sources('$(P6QREGEX_SOURCES)'), :file('$(P6QREGEX_COMBINED)'));
 
+my $p5qregex-combined := combine(:stage(2), :sources('$(P5QREGEX_SOURCES)'), :file('$(P5QREGEX_COMBINED)'));
 
+
+
+my $NQPP5QRegex-moarvm := cross-compile(:stage(2), :source($p5qregex-combined), :target('NQPP5QRegex'), :setting('NQPCORE'), :no-regex-lib(1), :deps([$nqpcore-moarvm, $QAST-moarvm, $hll-moar, $QRegex-moarvm]));
 
 my $NQPP6QRegex-moarvm := cross-compile(:stage(2), :source($p6qregex-combined), :target('NQPP6QRegex'), :setting('NQPCORE'), :no-regex-lib(1), :deps([$nqpcore-moarvm, $QAST-moarvm, $hll-moar, $QRegex-moarvm]));
 
@@ -183,7 +192,7 @@ say("node_modules/ModuleLoader.js: $nqpcore-moarvm src/vm/js/ModuleLoader.nqp
 	./nqp-js --target=js --output $ModuleLoader src/vm/js/ModuleLoader.nqp
 ");
 
-say("$nqp-bootstrapped: $QAST-moarvm $NQPP6QRegex-moarvm $nqp-combined $QRegex-moarvm
+say("$nqp-bootstrapped: $QAST-moarvm $NQPP5QRegex-moarvm $NQPP6QRegex-moarvm $nqp-combined $QRegex-moarvm
 	echo 'require(\"ModuleLoader\");' > $nqp-bootstrapped
 	./nqp-js --target=js  $nqp-combined >> $nqp-bootstrapped
 ");

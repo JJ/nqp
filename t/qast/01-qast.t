@@ -1,6 +1,6 @@
 use QAST;
 
-plan(68);
+plan(76);
 
 # Following a test infrastructure.
 sub compile_qast($qast) {
@@ -989,3 +989,200 @@ test_qast_result(
     -> $r {
         ok($r<pineapples>.m == 206, 'bindkey operation (int)');
     });
+
+class G {
+    has $!attr;
+    method plus() {
+        $!attr := $!attr+1;
+        $!attr
+    }
+}
+
+my $g1 := G.new(attr=>100);
+
+my $sc := nqp::createsc('exampleHandle');
+
+nqp::scsetobj($sc, 0, $g1);
+nqp::setobjsc($g1, $sc);
+
+if nqp::getcomp('nqp').backend.name eq 'jvm' {
+    todo('contvar tests need work on JVM', 1);
+    ok(0);
+} else {
+    is_qast(
+        QAST::Block.new(
+            QAST::Op.new(
+                :op<bind>,
+                QAST::Var.new( :name<$i>, :scope<lexical>, :decl<var>, :returns(int) ),
+                QAST::IVal.new( :value(3) )
+            ),
+            QAST::Op.new(
+                :op<bind>,
+                QAST::Var.new( :name<$total>, :scope<lexical>, :decl<var>, :returns(int) ),
+                QAST::IVal.new( :value(0) )
+            ),
+            QAST::Op.new(
+                :op<while>,
+                QAST::Var.new( :name<$i>, :scope<lexical> ),
+                QAST::Block.new(:blocktype<immediate>,
+    #                QAST::Op.new(:op('say'), QAST::Var.new(:name('$total'), :scope<lexical>)),
+                    QAST::Var.new( :name<$x>, :scope<lexical>, :decl<contvar>, :value($g1) ),
+                    QAST::Op.new(
+                        :op<bind>,
+                        QAST::Var.new( :name<$i>, :scope<lexical> ),
+                        QAST::Op.new(
+                            :op<sub_i>,
+                            QAST::Var.new( :name<$i>, :scope<lexical> ),
+                            QAST::IVal.new( :value(1) )
+                        )
+                    ),
+                    QAST::Op.new(
+                        :op<bind>,
+                        QAST::Var.new( :name<$total>, :scope<lexical>, :returns(int) ),
+                        QAST::Op.new(:op<add_i>,
+                            QAST::Op.new(
+                                :op<callmethod>, :name<plus>,
+                                QAST::Var.new( :name<$x>, :scope<lexical> )
+                            ),
+                            QAST::Var.new(:scope<lexical>, :name<$total>)
+                        )
+                    ),
+                )
+            ),
+            QAST::Var.new(:scope<lexical>, :name<$total>)
+        ),
+        303,
+        'contvar');
+}
+
+is_qast(
+    QAST::CompUnit.new(
+        :hll<funnylang>,
+        QAST::Block.new(
+            QAST::Op.new(:op<sethllconfig>, QAST::SVal.new(:value<funnylang>),
+                QAST::Op.new(:op<hash>,
+                    QAST::SVal.new(:value<null_value>),
+                    QAST::SVal.new(:value<hilarious>)
+                )
+            ),
+            QAST::Op.new(:op<hllize>, QAST::Op.new(:op<null>)),
+        )
+
+    ),
+    'hilarious',
+    'hllize');
+
+test_qast_result(
+    QAST::CompUnit.new(
+        :hll<foo>,
+        QAST::Block.new(
+            QAST::Op.new(:op<bindcurhllsym>,
+                QAST::SVal.new(:value<key1>),
+               QAST::IVal.new(:value(100))
+            ),
+             QAST::Op.new(:op<bindhllsym>,
+                 QAST::SVal.new(:value<bar>),
+                 QAST::SVal.new(:value<key1>),
+                 QAST::IVal.new(:value(200))
+             ),
+             QAST::Op.new(:op<bindhllsym>,
+                 QAST::SVal.new(:value<foo>),
+                 QAST::SVal.new(:value<key2>),
+                 QAST::IVal.new(:value(300))
+             ),
+             QAST::Op.new(
+                 :op('list'),
+                 QAST::Op.new(:op<gethllsym>, QAST::SVal.new(:value<foo>), QAST::SVal.new(:value<key1>)),
+                 QAST::Op.new(:op<getcurhllsym>, QAST::SVal.new(:value<key2>))
+             )
+       )
+    ),
+
+    -> $r {
+        ok($r[0] == 100, 'bindcurhllsym/gethllsym');
+        ok($r[1] == 300, 'bindhllsym/getcurhllsym');
+    }
+);
+
+my $dont_call;
+my class Ops {
+    method op1() {
+        my sub ($a, $b) {
+            nqp::list('+', $a, $b);
+        }
+    }
+    method op2() {
+        my sub ($a, $b) {
+            nqp::list('-', $a, $b);
+        }
+    }
+    method op3() {
+        my sub ($a, $b) {
+            0;
+        }
+    }
+    method is_called() {
+        $dont_call := 1;
+    }
+}
+
+
+sub stringy($op) {
+    if nqp::islist($op) {
+        '(' ~ stringy($op[1]) ~ ' ' ~ $op[0] ~ ' ' ~ $op[2] ~ ')';
+    }
+    else {
+        $op;
+    }
+}
+
+sub op($name) {
+    QAST::Op.new(
+        :op<bind>,
+        QAST::Var.new( :$name, :scope<lexical>, :decl<var>),
+        QAST::Op.new(
+           :op<callmethod>, :$name,
+           QAST::WVal.new( :value(Ops) )
+        ),
+    )
+}
+
+sub sval($value) {
+    QAST::SVal.new(:$value);
+}
+
+test_qast_result(
+    QAST::Block.new(
+        op('op1'),
+        op('op2'),
+        op('op3'),
+        QAST::Op.new(
+            :op<list>,
+            QAST::Op.new( :op<chain>, :name<op1>, sval('a'), sval('b')),
+            QAST::Op.new( :op<chain>, :name<op1>, 
+                QAST::Op.new( :op<chain>, :name<op2>,
+                    QAST::Op.new( :op<chain>, :name<op2>, sval('A'), sval('B')
+                    ),
+                    sval('C')
+                ),
+                sval('D')
+           ),
+           QAST::Op.new( :op<chain>, :name<op1>, 
+               QAST::Op.new( :op<chain>, :name<op2>,
+                   QAST::Op.new( :op<chain>, :name<op3>, 
+                       QAST::Op.new( :op<chain>, :name<op2>, sval('A'), sval('B')),
+                       sval('E')
+                   ),
+                   sval('C')
+               ),
+               QAST::Op.new( :op<callmethod>, :name('is_called'), QAST::WVal.new( :value(Ops) )),
+           ),
+       )
+    ),
+    -> $r {
+        ok(stringy($r[0]) eq '(a + b)', 'nqp::chain - just to arguments');
+        ok(stringy($r[1]) eq '(C + D)', 'nqp::chain - all return true');
+        ok(stringy($r[2]) eq '0', 'nqp::chain - we have falsehood');
+        ok(!$dont_call, 'nqp::chain shortcircuits');
+    }
+);

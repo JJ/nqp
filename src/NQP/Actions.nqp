@@ -389,16 +389,6 @@ class NQP::Actions is HLL::Actions {
                 $block,
                 QAST::Op.new( :op('exception') ),
             ),
-            QAST::VM.new(
-                :parrot(QAST::Op.new(
-                    :op('bindkey_i'),
-                    QAST::Op.new( :op('exception') ),
-                    QAST::SVal.new( :value('handled') ),
-                    QAST::IVal.new( :value(1) )
-                )),
-                :jvm(QAST::Op.new( :op('null') )),
-                :moar(QAST::Op.new( :op('null') ))
-            ),
             default_for('$'));
     }
 
@@ -430,16 +420,6 @@ class NQP::Actions is HLL::Actions {
             $ast,
             'CATCH',
             QAST::Stmts.new(
-                QAST::VM.new(
-                    :parrot(QAST::Op.new(
-                        :op('bindkey_i'),
-                        QAST::Op.new( :op('exception') ),
-                        QAST::SVal.new( :value('handled') ),
-                        QAST::IVal.new( :value(1) )
-                    )),
-                    :jvm(QAST::Op.new( :op('null') )),
-                    :moar(QAST::Op.new( :op('null') ))
-                ),
                 default_for('$')
             ));
         $/.prune();
@@ -571,7 +551,7 @@ class NQP::Actions is HLL::Actions {
                 $ast.fallback( default_for( $<sigil> ) );
             }
             else {
-                my $name := ~@name.pop;
+                my str $name := ~@name.pop;
                 my int $is_lex := 0;
                 if $*IN_DECL eq 'variable' || $name eq '$_' || $name eq '$/' || $name eq '$¢'
                 || $name eq '$!' || $<twigil> eq '?' || ($is_lex := $*W.is_lexical($name)) {
@@ -604,14 +584,14 @@ class NQP::Actions is HLL::Actions {
         if $*SCOPE eq 'our' || $*SCOPE eq '' {
             $*W.install_package_symbol($*OUTERPACKAGE, $<name><identifier>, $PACKAGE);
             if +$<name><identifier> == 1 {
-                $*W.install_lexical_symbol($*W.cur_lexpad(), $<name><identifier>[0], $PACKAGE);
+                $*W.install_lexical_symbol($*W.cur_lexpad(), ~$<name><identifier>[0], $PACKAGE);
             }
         }
         elsif $*SCOPE eq 'my' {
             if +$<name><identifier> != 1 {
                 $<name>.CURSOR.panic("A my scoped package cannot have a multi-part name yet");
             }
-            $*W.install_lexical_symbol($*W.cur_lexpad(), $<name><identifier>[0], $PACKAGE);
+            $*W.install_lexical_symbol($*W.cur_lexpad(), ~$<name><identifier>[0], $PACKAGE);
         }
         else {
             $/.CURSOR.panic("$*SCOPE scoped packages are not supported");
@@ -697,6 +677,14 @@ class NQP::Actions is HLL::Actions {
                     $/.CURSOR.panic("Could not find role '" ~ ~$_ ~ "'");
                 }
             }
+        }
+
+        # Extra traits, if present.
+        if $<nativesize> {
+            $*PACKAGE.HOW.set_nativesize($*PACKAGE, nqp::add_i($<size>, 0));
+        }
+        if $<unsigned> {
+            $*PACKAGE.HOW.set_unsigned($*PACKAGE, 1);
         }
 
         # Finally, compose.
@@ -855,8 +843,10 @@ class NQP::Actions is HLL::Actions {
         # If it's just got * as a body, make a multi-dispatch enterer.
         # Otherwise, need to build a sub.
         my $ast;
+        my int $onlystar;
         if $<onlystar> {
             $ast := only_star_block();
+            $onlystar := 1;
         }
         else {
             $ast := $<blockoid>.ast;
@@ -924,7 +914,7 @@ class NQP::Actions is HLL::Actions {
                     # this proto will work over, and install them along
                     # with the proto.
                     if $*SCOPE eq 'our' { nqp::die('our-scoped protos not yet implemented') }
-                    my $code := $*W.create_code($ast, $name, 1);
+                    my $code := $*W.create_code($ast, $name, 1, :$onlystar);
                     my $BLOCK := $*W.cur_lexpad();
 					$BLOCK[0].push(QAST::Op.new(
                         :op('bind'),
@@ -1006,8 +996,10 @@ class NQP::Actions is HLL::Actions {
         # If it's just got * as a body, make a multi-dispatch enterer.
         # Otherwise, build method block QAST.
         my $ast;
+        my int $onlystar;
         if $<onlystar> {
             $ast := only_star_block();
+            $onlystar := 1;
         }
         else {
             $ast := $<blockoid>.ast;
@@ -1044,7 +1036,7 @@ class NQP::Actions is HLL::Actions {
             # Insert it into the method table.
             my $meta_meth := $*MULTINESS eq 'multi' ?? 'add_multi_method' !! 'add_method';
             my $is_dispatcher := $*MULTINESS eq 'proto';
-            my $code := $*W.create_code($ast, $name, $is_dispatcher);
+            my $code := $*W.create_code($ast, $name, $is_dispatcher, :$onlystar);
             if $*MULTINESS eq 'multi' { attach_multi_signature($code, $ast); }
             $*W.pkg_add_method($*PACKAGE, $meta_meth, $name, $code);
             $ast.annotate('code_obj', $code);
@@ -1126,8 +1118,8 @@ class NQP::Actions is HLL::Actions {
 
     sub wrap_return_handler($ast) {
         QAST::Op.new(
-            :op<lexotic>, :name<RETURN>,
-            $ast
+            :op<handlepayload>, $ast,
+            'RETURN', QAST::Op.new( :op<lastexpayload> )
         )
     }
 
@@ -1238,32 +1230,7 @@ class NQP::Actions is HLL::Actions {
     }
 
     method trait_mod:sym<is>($/) {
-        if $<longname> eq 'parrot_vtable' {
-            # XXX This should be in Parrot-specific module and need a pragma.
-            my $c_ast := $<circumfix>[0].ast;
-            $/.CURSOR.panic("Trait 'parrot_vtable' requires constant scalar argument")
-                unless $c_ast ~~ QAST::SVal;
-            my $name := $c_ast.value;
-            my $package := $*PACKAGE;
-            my $is_dispatcher := $*SCOPE eq 'proto';
-            make -> $match {
-                $*W.pkg_add_method($package, 'add_parrot_vtable_mapping', $name,
-                    $match.ast.ann('code_obj') //
-                        $*W.create_code($match.ast.ann('block_ast'), $name, $is_dispatcher));
-            };
-        }
-        elsif $<longname> eq 'parrot_vtable_handler' {
-            # XXX This should be in Parrot-specific module and need a pragma.
-            my $c_ast := $<circumfix>[0].ast;
-            $/.CURSOR.panic("Trait 'parrot_vtable_handler' requires constant scalar argument")
-                unless $c_ast ~~ QAST::SVal;
-            my $name := $c_ast.value;
-            my $package := $*PACKAGE;
-            make -> $match {
-                $*W.pkg_add_parrot_vtable_handler_mapping($package, $name, ~$match<variable>);
-            };
-        }
-        elsif $<longname> eq 'positional_delegate' {
+        if $<longname> eq 'positional_delegate' {
             make -> $m { $*DECLARAND_ATTR.set_positional_delegate(1) };
         }
         elsif $<longname> eq 'associative_delegate' {
@@ -1323,7 +1290,7 @@ class NQP::Actions is HLL::Actions {
             $block.symbol('$/', :scope<lexical>);
             my $code  := %*RX<code>;
             my $regex := %*LANG<Regex-actions>.qbuildsub($<p6regex>.ast, $block,
-                code_obj => $code, cursor_type => $*W.find_sym(['NQPCursor']));
+                code_obj => $code);
             $regex.name($name);
 
             if $*PKGDECL && nqp::can($*PACKAGE.HOW, 'add_method') {
@@ -1432,19 +1399,6 @@ class NQP::Actions is HLL::Actions {
             $ast.unshift($var);
         }
         make $ast;
-        $/.prune;
-    }
-
-    method term:sym<pir::op>($/) {
-        my @args := $<args> ?? $<args>[0].ast.list !! [];
-        my $pirop := ~$<op>;
-        $pirop := join(' ', nqp::split('__', $pirop));
-        make QAST::VM.new( :pirop($pirop), :node($/), |@args );
-        $/.prune;
-    }
-
-    method term:sym<pir::const>($/) {
-        make QAST::VM.new( :pirconst(~$<const>) );
         $/.prune;
     }
 
@@ -1605,9 +1559,6 @@ class NQP::Actions is HLL::Actions {
     method quote:sym<qq>($/)   { make $<quote_EXPR>.ast; }
     method quote:sym<q>($/)    { make $<quote_EXPR>.ast; }
     method quote:sym<Q>($/)    { make $<quote_EXPR>.ast; }
-    method quote:sym<Q:PIR>($/) {
-        make QAST::VM.new( :pir( $<quote_EXPR>.ast.value ), :node($/) );
-    }
 
     method quote:sym</ />($/) {
         my $block := $*W.pop_lexpad();
@@ -1645,8 +1596,14 @@ class NQP::Actions is HLL::Actions {
     method postfix:sym<.>($/) { make $<dotty>.ast; }
 
     method term:sym<return>($/) {
-        make QAST::Op.new( :op('call'), :name('RETURN'),
-            $<EXPR> ?? $<EXPR>.ast !!  QAST::WVal.new( :value($*W.find_sym(['NQPMu'])) ));
+        # This can go away in favor of nqp::const::CONTROL_RETURN after rebootstrap
+        # of Moar and JVM backends.
+        my $CONTROL_RETURN := (nqp::getcomp('nqp').backend.name eq 'moar' || nqp::getcomp('nqp').backend.name eq 'js') ?? 32 !! 65536;
+        make QAST::Op.new(
+            :op('throwpayloadlex'),
+            QAST::IVal.new( :value($CONTROL_RETURN) ),
+            $<EXPR> ?? $<EXPR>.ast !!  QAST::WVal.new( :value($*W.find_sym(['NQPMu'])))
+        );
     }
 
     method prefix:sym<make>($/) {
@@ -1729,7 +1686,7 @@ class NQP::Actions is HLL::Actions {
         # then strip it off.
         else {
             my $path;
-            if $*W.is_lexical(@name[0]) {
+            if $*W.is_lexical(~@name[0]) {
                 try {
                     my $first := @name.shift();
                     $path := QAST::WVal.new( :value($*W.find_sym([$first])) );
@@ -1942,5 +1899,13 @@ class NQP::RegexActions is QRegex::P6Regex::Actions {
             @saved.push($_.save(:non_empty));
         }
         $code_obj.SET_ALT_NFA($key, @saved);
+    }
+
+    method set_cursor_type($qast) {
+        my $cursor_type := nqp::null();
+        try {
+            $cursor_type := $*W.find_sym(['NQPCursor']);
+        };
+        $qast.cursor_type($cursor_type) unless nqp::isnull($cursor_type);
     }
 }

@@ -36,12 +36,6 @@ knowhow NQPClassHOW {
     has %!caches;
     has $!is_mixin;
 
-#?if parrot
-    # Parrot-specific vtable mapping hash. Maps vtable name to method.
-    has %!parrot_vtable_mapping;
-    has %!parrot_vtable_handler_mapping;
-#?endif
-
     # Call tracing.
     has $!trace;
     has $!trace_depth;
@@ -79,10 +73,6 @@ knowhow NQPClassHOW {
         %!method-vtable-slots := nqp::hash();
         @!mro := nqp::list();
         @!done := nqp::list();
-#?if parrot
-        %!parrot_vtable_mapping := nqp::hash();
-        %!parrot_vtable_handler_mapping := nqp::hash();
-#?endif
         @!BUILDALLPLAN := nqp::list();
         @!BUILDPLAN := nqp::list();
         $!is_mixin := 0;
@@ -95,7 +85,9 @@ knowhow NQPClassHOW {
     # to go with it, and return that.
     method new_type(:$name = '<anon>', :$repr = 'P6opaque') {
         my $metaclass := self.new(:name($name));
-        nqp::setwho(nqp::newtype($metaclass, $repr), {});
+        nqp::setdebugtypename(
+            nqp::setwho(nqp::newtype($metaclass, $repr), {}),
+            $name);
     }
 
     method add_method($obj, $name, $code_obj) {
@@ -174,10 +166,6 @@ knowhow NQPClassHOW {
         self.publish_type_cache($obj);
         self.publish_method_cache($obj);
         self.publish_boolification_spec($obj);
-#?if parrot
-        self.publish_parrot_vtable_mapping($obj);
-		self.publish_parrot_vtablee_handler_mapping($obj);
-#?endif
         1;
     }
 
@@ -190,25 +178,6 @@ knowhow NQPClassHOW {
         nqp::push(@!roles, $role);
     }
 
-#?if parrot
-    method add_parrot_vtable_mapping($obj, $name, $meth) {
-        if nqp::defined(%!parrot_vtable_mapping{$name}) {
-            nqp::die("Class '" ~ $!name ~
-                "' already has a Parrot v-table override for '" ~
-                $name ~ "'");
-        }
-        %!parrot_vtable_mapping{$name} := $meth;
-    }
-
-    method add_parrot_vtable_handler_mapping($obj, $name, $att_name) {
-        if nqp::defined(%!parrot_vtable_handler_mapping{$name}) {
-            nqp::die("Class '" ~ $!name ~
-                "' already has a Parrot v-table handler for '" ~
-                $name ~ "'");
-        }
-        %!parrot_vtable_handler_mapping{$name} := [ $obj, $att_name ];
-    }
-#?endif
 
     method compose($obj) {
         # Incorporate roles. First, specialize them with the type object
@@ -245,12 +214,6 @@ knowhow NQPClassHOW {
         self.publish_method_cache($obj);
         self.publish_boolification_spec($obj);
 
-#?if parrot
-        # Install Parrot v-table mapping.
-        self.publish_parrot_vtable_mapping($obj);
-		self.publish_parrot_vtablee_handler_mapping($obj);
-#?endif
-        
         # Create BUILDPLAN.
         self.create_BUILDPLAN($obj);
         
@@ -493,39 +456,6 @@ knowhow NQPClassHOW {
         }
     }
 
-#?if parrot
-    method publish_parrot_vtable_mapping($obj) {
-        my %mapping;
-        my %seen_handlers;
-        for @!mro {
-            for $_.HOW.parrot_vtable_handler_mappings($_, :local(1)) {
-                %seen_handlers{$_.key} := 1;
-            }
-            for $_.HOW.parrot_vtable_mappings($_, :local(1)) {
-                unless nqp::existskey(%mapping, $_.key)
-                        || nqp::existskey(%seen_handlers, $_.key) {
-                    %mapping{$_.key} := $_.value;
-                }
-            }
-        }
-        if +%mapping {
-            pir::stable_publish_vtable_mapping__0PP($obj, %mapping);
-        }
-    }
-
-    method publish_parrot_vtablee_handler_mapping($obj) {
-        my %mapping;
-        my @mro_reversed := reverse(@!mro);
-        for @mro_reversed {
-            for $_.HOW.parrot_vtable_handler_mappings($_, :local(1)) {
-                %mapping{$_.key} := $_.value;
-            }
-        }
-        if +%mapping {
-            pir::stable_publish_vtable_handler_mapping__0PP($obj, %mapping);
-        }
-    }
-#?endif
 
     # Creates the plan for building up the object. This works
     # out what we'll need to do up front, so we can just zip
@@ -666,15 +596,6 @@ knowhow NQPClassHOW {
         @attrs
     }
 
-#?if parrot
-    method parrot_vtable_mappings($obj, :$local!) {
-        %!parrot_vtable_mapping
-    }
-
-    method parrot_vtable_handler_mappings($obj, :$local!) {
-        %!parrot_vtable_handler_mapping
-    }
-#?endif
 
     ##
     ## Checky

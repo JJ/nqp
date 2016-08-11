@@ -11,6 +11,7 @@ class QAST::Block is QAST::Node does QAST::Children {
 
     method new(str :$name, str :$blocktype, *@children, *%options) {
         my $node := nqp::create(self);
+        nqp::bindattr_i($node, QAST::Node, '$!flags', 0);
         nqp::bindattr($node, QAST::Block, '@!children', @children);
         nqp::bindattr_s($node, QAST::Block, '$!name', $name);
         nqp::bindattr_s($node, QAST::Block, '$!blocktype', $blocktype);
@@ -37,8 +38,6 @@ class QAST::Block is QAST::Node does QAST::Children {
     }
 
     my $cur_cuid := 0;
-    my $cuid_suffix := ~nqp::time_n();
-    
     method cuid($value = NO_VALUE) {
         if !($value =:= NO_VALUE) {
             # Set ID if we are provided one.
@@ -51,20 +50,22 @@ class QAST::Block is QAST::Node does QAST::Children {
         else {
             # Otherwise, generate one.
             $cur_cuid := $cur_cuid + 1;
-            $!cuid := 'cuid_' ~ $cur_cuid ~ '_' ~ $cuid_suffix;
+            $!cuid := ~$cur_cuid;
         }
     }
 
     my %NOSYMS := nqp::hash();
-    method symbol($name, *%attrs) {
+    method symbol(str $name, *%attrs) {
         %!symbol := nqp::hash() if nqp::isnull(%!symbol);
         if %attrs {
             my %syms := %!symbol{$name};
-            unless nqp::ishash(%syms) {
-                %!symbol{$name} := %syms := nqp::hash();
+            if nqp::ishash(%syms) && nqp::elems(%syms) {
+                for %attrs {
+                    %syms{$_.key} := $_.value;
+                }
             }
-            for %attrs {
-                %syms{$_.key} := $_.value;
+            else {
+                %!symbol{$name} := %syms := %attrs;
             }
             %syms
         }

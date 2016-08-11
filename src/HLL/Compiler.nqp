@@ -1,3 +1,5 @@
+my $more-code-sentinel := nqp::hash();
+
 # Provides base functionality for a compiler object.
 class HLL::Compiler does HLL::Backend::Default {
     has @!stages;
@@ -21,7 +23,7 @@ class HLL::Compiler does HLL::Backend::Default {
         @!stages     := nqp::split(' ', 'start parse ast ' ~ $!backend.stages());
         
         # Command options and usage.
-        @!cmdoptions := nqp::split(' ', 'e=s help|h target=s trace|t=s encoding=s output|o=s combine version|v show-config verbose-config|V stagestats=s? ll-exception rxtrace nqpevent=s profile profile-compile profile-filename=s');
+        @!cmdoptions := nqp::split(' ', 'e=s help|h target=s trace|t=s encoding=s output|o=s source-name=s combine version|v show-config verbose-config|V stagestats=s? ll-exception rxtrace nqpevent=s profile=s? profile-compile=s? profile-filename=s');
         %!config     := nqp::hash();
     }
     
@@ -54,7 +56,7 @@ class HLL::Compiler does HLL::Backend::Default {
 
     method readline($stdin, $stdout, $prompt) {
         nqp::printfh(nqp::getstdout(), $prompt);
-        return nqp::readlinefh($stdin);
+        return nqp::readlinechompfh($stdin);
     }
 
     method context() {
@@ -86,15 +88,6 @@ class HLL::Compiler does HLL::Backend::Default {
                 $code := $code ~ $newcode;
             }
 
-            if $newcode && nqp::substr($newcode, nqp::chars($newcode) - 1) eq "\\" {
-                # Need to get more code before we execute
-                $code := nqp::substr($code, 0, nqp::chars($code) - 1); # strip the \
-                if $code {
-                    $prompt := '* ';
-                }
-                next;
-            }
-
             # Set the current position of stdout for autoprinting control
             my $*AUTOPRINTPOS := nqp::tellfh(nqp::getstdout());
             my $*CTXSAVE := self;
@@ -109,6 +102,17 @@ class HLL::Compiler does HLL::Backend::Default {
                         self.interactive_exception($!);
                     }
                 };
+                if self.input-incomplete($output) {
+                    # Need to get more code before we execute
+                    # Strip the trailing \, but reinstate the newline
+                    if nqp::substr($code, 0, nqp::chars($code) - 2) eq "\\\n" {
+                        $code := nqp::substr($code, 0, nqp::chars($code) - 2) ~ "\n";
+                    }
+                    if $code {
+                        $prompt := '* ';
+                    }
+                    next;
+                }
                 if nqp::defined($*MAIN_CTX) {
                     $!save_ctx := $*MAIN_CTX;
                 }
@@ -138,13 +142,25 @@ class HLL::Compiler does HLL::Backend::Default {
         nqp::print(~$ex ~ "\n")
     }
 
+    method input-incomplete($value) {
+        nqp::where($value) == nqp::where($more-code-sentinel);
+    }
+
+    method needs-more-input() {
+        $more-code-sentinel
+    }
+
     method eval($code, *@args, *%adverbs) {
         my $output;
 
-        if (%adverbs<profile-compile>) {
+        if $code && nqp::substr($code, nqp::chars($code) - 2) eq "\\\n" {
+            return self.needs-more-input();
+        }
+
+        if nqp::existskey(%adverbs, 'profile-compile') {
             $output := $!backend.run_profiled({
                 self.compile($code, :compunit_ok(1), |%adverbs);
-            }, %adverbs<profile-filename>);
+            }, %adverbs<profile-compile>, %adverbs<profile-filename>);
         }
         else {
             $output := self.compile($code, :compunit_ok(1), |%adverbs);
@@ -157,8 +173,9 @@ class HLL::Compiler does HLL::Backend::Default {
                 nqp::forceouterctx($output, $outer_ctx);
             }
 
-            if (%adverbs<profile>) {
-                $output := $!backend.run_profiled({ $output(|@args) }, %adverbs<profile-filename>);
+            if nqp::existskey(%adverbs, 'profile') {
+                $output := $!backend.run_profiled({ $output(|@args) },
+                    %adverbs<profile>, %adverbs<profile-filename>);
             }
             elsif %adverbs<trace> {
                 $output := $!backend.run_traced(%adverbs<trace>, { $output(|@args) });
@@ -366,7 +383,7 @@ class HLL::Compiler does HLL::Backend::Default {
             nqp::exit(1) if $err;
         }
         my $code := join('', @codes);
-        my $?FILES := join(' ', @files);
+        my $?FILES := %adverbs<source-name> || join(' ', @files);
         my $r := self.eval($code, |@args, |%adverbs);
         if $target eq '' || $!backend.is_textual_stage($target) || %adverbs<output> {
             return $r;
@@ -491,17 +508,22 @@ class HLL::Compiler does HLL::Backend::Default {
     }
 
     method version() {
-        my $version := %!config<version>;
-        my $backver := $!backend.version_string();
-	my $language := $!language;
-	if $language eq 'perl6' {    # XXX This hardwired info needs to come from somewhere else
-	    nqp::say("This is rakudo version $version built on $backver implementing Perl v6.b.");
-	}
-	else {
-	    nqp::say("This is $language version $version built on $backver.");
-	}
+        my $version        := %!config<version>;
+        my $backver        := $!backend.version_string();
+        my $implementation := self.implementation();
+        my $language_name  := self.language_name();
+        if nqp::can(self, 'language_version') {
+            nqp::say("This is $implementation version $version built on $backver\n" ~
+                "implementing $language_name " ~ self.language_version() ~ ".");
+        }
+        else {
+            nqp::say("This is $implementation version $version built on $backver");
+        }
         nqp::exit(0);
     }
+
+    method implementation() { $!language }
+    method language_name() { $!language }
 
     method show-config() { self.verbose-config(); }
 
@@ -581,57 +603,69 @@ class HLL::Compiler does HLL::Backend::Default {
         }
         @actual_ns;
     }
+
 	
-	method lineof($target, int $pos, int :$cache = 0) {
-		my $linepos;
-		if $cache {
-			# if we've previously cached c<linepos> for target, we use it.
-			$linepos := $*LINEPOSCACHE;
-		}
-		unless nqp::defined($linepos) {
-			# calculate a new linepos array.
-			$linepos := nqp::list_i();
-			if $cache {
-				$*LINEPOSCACHE := $linepos;
-			}
-			my str $s := ~$target;
-			my int $eos := nqp::chars($s);
-			my int $jpos := 0;
-			my int $ord;
-			# search for all of the newline markers in c<target>.  when we
-			# find one, mark the ending offset of the line in c<linepos>.
-			while nqp::islt_i($jpos := nqp::findcclass(nqp::const::CCLASS_NEWLINE,
-													   $s, $jpos, $eos), $eos)
-			{
-				$ord := nqp::ord($s, $jpos);
-				$jpos := nqp::add_i($jpos, 1);
-				nqp::push_i($linepos, $jpos);
-				# Treat \r\n as a single logical newline. Note that NFG
+    method line_and_column_of($target, int $pos, int :$cache = 0) {
+        my $linepos;
+        if $cache {
+            # if we've previously cached c<linepos> for target, we use it.
+            $linepos := $*LINEPOSCACHE;
+        }
+        unless nqp::defined($linepos) {
+            # calculate a new linepos array.
+            $linepos := nqp::list_i();
+            if $cache {
+                $*LINEPOSCACHE := $linepos;
+            }
+            my str $s := ~$target;
+            my int $eos := nqp::chars($s);
+            my int $jpos := 0;
+            my int $ord;
+            # search for all of the newline markers in c<target>.  when we
+            # find one, mark the ending offset of the line in c<linepos>.
+            while nqp::islt_i($jpos := nqp::findcclass(nqp::const::CCLASS_NEWLINE,
+                                                       $s, $jpos, $eos), $eos)
+            {
+                $ord := nqp::ord($s, $jpos);
+                $jpos := nqp::add_i($jpos, 1);
+                nqp::push_i($linepos, $jpos);
+                # Treat \r\n as a single logical newline. Note that NFG
                 # implementations, we should check it really is a lone \r,
                 # not the first bit of a \r\n grapheme.
-				if nqp::iseq_i($ord, 13) && nqp::substr($s, $jpos - 1, 1) eq "\r" &&
+                if nqp::iseq_i($ord, 13) && nqp::substr($s, $jpos - 1, 1) eq "\r" &&
                    $jpos < $eos && nqp::iseq_i(nqp::ord($s, $jpos), 10)
-				{
-					$jpos := nqp::add_i($jpos, 1);
-				}
-			}
-		}
-		
-		# We have c<linepos>, so now we (binary) search the array
-		# for the largest element that is not greater than c<pos>.
-		my int $lo := 0;
-		my int $hi := nqp::elems($linepos);
-		my int $line;
-		while nqp::islt_i($lo, $hi) {
-			$line := nqp::div_i(nqp::add_i($lo, $hi), 2);
-			if nqp::isgt_i(nqp::atpos_i($linepos, $line), $pos) {
-				$hi := $line;
-			} else {
-				$lo := nqp::add_i($line, 1);
-			}
-		}
-		nqp::add_i($lo, 1);
-	}
+                {
+                    $jpos := nqp::add_i($jpos, 1);
+                }
+            }
+        }
+        
+        # We have c<linepos>, so now we (binary) search the array
+        # for the largest element that is not greater than c<pos>.
+        my int $lo := 0;
+        my int $hi := nqp::elems($linepos);
+        my int $line;
+        while nqp::islt_i($lo, $hi) {
+            $line := nqp::div_i(nqp::add_i($lo, $hi), 2);
+            if nqp::isgt_i(nqp::atpos_i($linepos, $line), $pos) {
+                $hi := $line;
+            } else {
+                $lo := nqp::add_i($line, 1);
+            }
+        }
+
+        my $column := nqp::iseq_i($lo, 0)
+            ?? $pos 
+            !! nqp::sub_i($pos, nqp::atpos_i($linepos, nqp::sub_i($lo, 1)));
+
+        nqp::list_i(nqp::add_i($lo, 1), nqp::add_i($column, 1));
+    }
+
+    method lineof($target, int $pos, int :$cache = 0) {
+        nqp::atpos_i(self.line_and_column_of($target, $pos, :$cache), 0);
+    }
+
+    
 
     # the name of the file(s) that are executed, or -e  or 'interactive'
     method user-progname() { $!user_progname // 'interactive' }

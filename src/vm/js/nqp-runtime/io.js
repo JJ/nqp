@@ -1,11 +1,13 @@
 var fs = require('fs-ext');
+var os = require('os');
 var sleep = require('sleep');
-var iconv = require('iconv-lite');
 
 var tty = require('tty');
 var nqpIo = require('nqp-js-io');
 
 var Hash = require('./hash.js');
+
+var core = require('./core.js');
 
 var child_process = require('child_process');
 
@@ -18,6 +20,7 @@ exports.op = op;
 
 op.print = function(arg) {
   process.stdout.write(arg);
+  return arg;
 };
 
 op.say = function(arg) {
@@ -27,9 +30,10 @@ op.say = function(arg) {
   } else {
     console.log(arg);
   }
+  return arg;
 };
 
-op.stat = function(file, code) {
+function stat(file, code, lstat) {
   var EXISTS = 0;
   var FILESIZE = 1;
   var ISDIR = 2;
@@ -53,7 +57,11 @@ op.stat = function(file, code) {
 
   // we can't use fs.existsSync(file) as it follows symlinks
   try {
-    var stats = fs.lstatSync(file);
+    if (lstat || code == ISLNK) {
+      var stats = fs.lstatSync(file);
+    } else {
+      var stats = fs.statSync(file);
+    }
   } catch (err) {
     if (code == EXISTS && err.code === 'ENOENT') {
       return 0;
@@ -85,6 +93,23 @@ op.stat = function(file, code) {
     case PLATFORM_BLOCKSIZE: return stats.blksize;
     case PLATFORM_BLOCKS: return stats.blocks;
   }
+}
+
+
+op.stat = function(file, code) {
+  return stat(file, code, false) | 0;
+};
+
+op.stat_time = function(file, code) {
+  return stat(file, code, false);
+};
+
+op.lstat = function(file, code) {
+  return stat(file, code, true) | 0;
+};
+
+op.lstat_time = function(file, code) {
+  return stat(file, code, true);
 };
 
 function FileHandle(fd) {
@@ -101,10 +126,10 @@ FileHandle.prototype.isttyfh = function() {
 
 FileHandle.prototype.printfh = function(content) {
   var buffer = new Buffer(content, this.encoding);
-  return fs.writeSync(this.fd, buffer, 0, buffer.length, 0);
+  return fs.writeSync(this.fd, buffer, 0, buffer.length);
 };
 
-FileHandle.prototype.$$to_bool = function(ctx) {
+FileHandle.prototype.$$toBool = function(ctx) {
   return 1;
 };
 
@@ -129,7 +154,7 @@ op.eoffh = function(fh) {
 };
 
 op.setencoding = function(fh, encoding) {
-  fh.encoding = encoding;
+  fh.encoding = core.renameEncoding(encoding);
 };
 
 op.setinputlinesep = function(fh, sep) {
@@ -137,7 +162,7 @@ op.setinputlinesep = function(fh, sep) {
 };
 
 op.setinputlineseps = function(fh, seps) {
-  fh.seps = seps;
+  fh.seps = seps.array;
 };
 
 op.readlinefh = function(fh) {
@@ -167,7 +192,7 @@ function readline(fh, chomp) {
     var sep;
     var newline = -1;
     if (fh.seps) {
-      for (var i=0; i < fh.seps.length; i++) {
+      for (var i = 0; i < fh.seps.length; i++) {
         var offset = string.indexOf(fh.seps[i]);
         if (offset != -1 && (newline == -1 || offset < newline)) {
           newline = offset;
@@ -182,46 +207,77 @@ function readline(fh, chomp) {
         if (cr < nl) {
           newline = cr;
           if (cr + 1 == nl) {
-            sep = "\r\n";
+            sep = '\r\n';
           } else {
-            sep = "\r";
+            sep = '\r';
           }
         }
       } else {
         newline = nl;
-        sep = "\n";
+        sep = '\n';
       }
     }
 
     if (newline != -1) {
-      var up_to_newline = string.slice(0, newline);
+      var upToNewline = string.slice(0, newline);
       // THINK ABOUT decoding and encoding might give a different offset
 
       fs.seekSync(fh.fd,
-          Buffer.byteLength(up_to_newline + sep, fh.encoding) + starting, 0);
+          Buffer.byteLength(upToNewline + sep, fh.encoding) + starting, 0);
 
-      return (chomp ? up_to_newline : up_to_newline + sep);
+      return (chomp ? upToNewline : upToNewline + sep).replace(/\r\n/, '\n');
     }
   }
 
   fs.seekSync(fh.fd, position, 0);
-  return string;
-};
+  return string.replace(/\r\n/, '\n');
+}
 
-
+var CHUNK_SIZE = 32768;
 op.readallfh = function(fh) {
+  if (fh instanceof nqpIo.SyncPipe) {
+    return fh.slurp().toString(fh.encoding || 'utf8');
+  }
   var all = new Buffer(0);
-  var buf = new Buffer(10);
+  var buf = new Buffer(CHUNK_SIZE);
   var total = 0;
   var bytesRead;
   while ((bytesRead = fs.readSync(fh.fd, buf, 0, buf.length, null)) != 0) {
     total += bytesRead;
     var all = Buffer.concat([all, buf], total);
   }
-  return iconv.decode(all, fh.encoding);
+  return all.toString(fh.encoding).replace(/\r\n/, '\n');
 };
 
-op.seekfh = function(fh, offset, whence, ctx) {
+op.readcharsfh = function(fh, count) {
+  var all = new Buffer(0);
+  var buf = new Buffer(CHUNK_SIZE);
+  var bytesRead;
+  var total = 0;
+
+  var starting = fs.seekSync(fh.fd, 0, 1);
+
+  while ((bytesRead = fs.readSync(fh.fd, buf, 0, buf.length, null)) != 0 && all.toString(fh.encoding).length < count) {
+    total += bytesRead;
+    all = Buffer.concat([all, buf], total);
+  }
+  var encoded = all.toString(fh.encoding);
+
+  if (encoded.length < count) {
+    return encoded;
+  }
+
+  while (encoded.length > count) {
+    /* We assume that n bytes contain at most n chars */
+    all = all.slice(0, all.length - (encoded.length - count));
+    encoded = all.toString(fh.encoding);
+  }
+
+  fs.seekSync(fh.fd, all.length + starting, 0);
+  return encoded;
+};
+
+op.seekfh = function(ctx, fh, offset, whence) {
   if (whence == 0 && offset < 0) {
     ctx.die("Can't seek to position: " + offset);
   }
@@ -232,8 +288,21 @@ op.seekfh = function(fh, offset, whence, ctx) {
 };
 
 op.closefh = function(fh) {
+  if (fh instanceof nqpIo.SyncPipe) {
+    fh.close();
+    return fh;
+  }
   fh.closefh();
   return fh;
+};
+
+op.closefh_i = function(fh) {
+  if (fh instanceof nqpIo.SyncPipe) {
+    return fh.close();
+  }
+  op.closefh(fh);
+  /* TODO proper return value */
+  return 0;
 };
 
 op.isttyfh = function(fh) {
@@ -242,6 +311,10 @@ op.isttyfh = function(fh) {
 
 op.printfh = function(fh, content) {
   return fh.printfh(content);
+};
+
+op.sayfh = function(fh, content) {
+  return fh.printfh(content + '\n');
 };
 
 op.unlink = function(filename) {
@@ -267,7 +340,7 @@ op.rmdir = function(dir) {
 op.mkdir = function(dir, mode) {
   try {
     fs.accessSync(dir, fs.F_OK);
-  } catch(e) {
+  } catch (e) {
     fs.mkdirSync(dir, mode);
   }
 };
@@ -286,34 +359,16 @@ var PIPE_IGNORE_ERR = 128;
 var PIPE_CAPTURE_ERR = 256;
 
 op.spawn = function(command, dir, env, input, output, error, flags) {
-    nqpIo.spawn(command, dir, env.content, input, output, error, flags);
+  nqpIo.spawn(command.array, dir, env.$$toObject(), input, output, error, flags);
+};
+
+
+op.syncpipe = function() {
+  return new nqpIo.SyncPipe();
 };
 
 op.shell = function(command, dir, env, input, output, error, flags) {
-
-  if (flags != PIPE_INHERIT_IN + PIPE_INHERIT_OUT + PIPE_INHERIT_ERR) {
-    throw 'shell: NYI combination of flags';
-  }
-
-  var oldEnv = {};
-  for (var v in process.env) {
-    oldEnv[v] = process.env[v];
-  }
-  var oldCwd = process.cwd();
-  for (var v in env.content) {
-    process.env[v] = env.content[v];
-  }
-  process.chdir(dir);
-  child_process.execSync(command);
-  process.chdir(oldCwd);
-
-  // restore the contents of object in process.env
-  for (var v in process.env) {
-    delete process.env[v];
-  }
-  for (var v in oldEnv) {
-    process.env[v] = oldEnv[v];
-  }
+  nqpIo.shell(command, dir, env.$$toObject(), input, output, error, flags);
 };
 
 op.cwd = function() {
@@ -323,7 +378,7 @@ op.cwd = function() {
 op.getenvhash = function() {
   var hash = new Hash();
   for (var key in process.env) {
-    hash.content[key] = process.env[key];
+    hash.content.set(key, process.env[key]);
   }
   return hash;
 };
@@ -339,7 +394,7 @@ Stderr.prototype.isttyfh = function() {
   return (process.stderr.isTTY ? 1 : 0);
 };
 
-Stderr.prototype.$$to_bool = function(ctx) {
+Stderr.prototype.$$toBool = function(ctx) {
   return 1;
 };
 
@@ -358,7 +413,7 @@ Stdout.prototype.printfh = function(msg) {
   process.stdout.write(msg);
 };
 
-Stdout.prototype.$$to_bool = function(ctx) {
+Stdout.prototype.$$toBool = function(ctx) {
   return 1;
 };
 
@@ -374,7 +429,7 @@ op.flushfh = function(fh) {
 function Stdin() {
 }
 
-Stdin.prototype.$$to_bool = function(ctx) {
+Stdin.prototype.$$toBool = function(ctx) {
   return 1;
 };
 
@@ -388,4 +443,21 @@ op.getstdin = function() {
 
 op.exit = function(code) {
   process.exit(code);
+};
+
+op.readlink = function(path) {
+  return fs.readlinkSync(path);
+};
+
+op.gethostname = function() {
+  return os.hostname();
+};
+
+op.chmod = function(path, mode) {
+  return fs.chmodSync(path, mode);
+};
+
+op.sleep = function(seconds) {
+  sleep.usleep(Math.floor(seconds * 1000000));
+  return seconds;
 };

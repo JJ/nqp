@@ -5,6 +5,7 @@ my knowhow NQPRoutine {
     has $!dispatch_cache;
     has $!dispatch_order;
     has $!clone_callback;
+    has int $!onlystar;
     
     # Adds a multi-dispatch candidate.
     method add_dispatchee($code) {
@@ -273,12 +274,7 @@ my knowhow NQPRoutine {
             $i := 0;
             while $i < $type_check_count {
                 my $param := nqp::captureposarg($capture, $i);
-#?if parrot
-                my $param_type := pir::what_or_null__PP($param);
-#?endif
-#?if !parrot
                 my $param_type := $param.WHAT;
-#?endif
                 my $type_obj := $cur_candidate<types>[$i];
                 my $definedness := $cur_candidate<definednesses>[$i];
                 unless nqp::eqaddr($param_type, $type_obj) || nqp::isnull($type_obj) || is_narrower_type($param_type, $type_obj) {
@@ -352,6 +348,9 @@ my knowhow NQPRoutine {
     method signature() { $!signature }
 }
 nqp::setinvokespec(NQPRoutine, NQPRoutine, '$!do', nqp::null);
+#?if moar
+nqp::setmultispec(NQPRoutine, NQPRoutine, '$!onlystar', '$!dispatch_cache');
+#?endif
 nqp::setboolspec(NQPRoutine, 5, nqp::null());
 
 my knowhow NQPSignature {
